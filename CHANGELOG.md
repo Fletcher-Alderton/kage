@@ -1,4 +1,44 @@
 # Changelog
+## [0.4.1](https://github.com/QaidVoid/kage/compare/v0.4.0...v0.4.1) - 2026-10-20
+
+### Features
+
+- *(agents)* Add default agent model and thinking options - ([49b331a](https://github.com/QaidVoid/kage/commit/49b331a5ef78df2713a2197f9cb494aeab6f4498))
+- *(agents)* Resume finished agents on send_message - ([095277a](https://github.com/QaidVoid/kage/commit/095277a108f0f6b02366605ff2235bc43fc49223))
+- *(provider)* Send opencode session headers to opencode.ai - ([36b4d1b](https://github.com/QaidVoid/kage/commit/36b4d1b2cb7340919b740fb8749d765975d5f480))
+- *(thinking)* Add a max level above xhigh - ([a1ac692](https://github.com/QaidVoid/kage/commit/a1ac692352e0726a04002f760357b6b00fee29d6))
+
+### Bug Fixes
+
+- *(cli)* Probe mcp servers with the same startup deadline a run uses - ([cfc0ba9](https://github.com/QaidVoid/kage/commit/cfc0ba9755cca1b466b3c8fc367a2e50ca0f9e03))
+- *(cli)* Atomic config write and private history and state files - ([c9b0477](https://github.com/QaidVoid/kage/commit/c9b0477c4fc5fb35702c5de56c7eea873d196546))
+- *(cli)* Keep subcommand options inside the manpage COMMANDS section - ([c33a27e](https://github.com/QaidVoid/kage/commit/c33a27e77ff77dcf348e0bef211e484a5126e5aa))
+- *(cli)* Keep tools named by their advertised name in mcp serve - ([cd1ec9e](https://github.com/QaidVoid/kage/commit/cd1ec9edeefd83a12a258b0f09007301c211e903))
+- *(jsonrpc)* Answer a non-UTF-8 line and refuse a memberless response - ([893dd85](https://github.com/QaidVoid/kage/commit/893dd8581c10c5a0966dcde8f70a27b183059329))
+- *(plugin)* Saturate the http max_bytes lookahead instead of overflowing - ([f873336](https://github.com/QaidVoid/kage/commit/f87333618802575da174edb681785082e925222a))
+- *(plugin)* Reject an oversized kage.exec timeout_secs - ([df42111](https://github.com/QaidVoid/kage/commit/df421117df39f623490f686fb879b5535c5f2992))
+- *(provider)* Detect anthropic gateways that count cache in input - ([198916e](https://github.com/QaidVoid/kage/commit/198916e1d4ee74c163132235c836a80434233ab7))
+- *(provider)* Replay unsigned thinking as native blocks - ([eac835a](https://github.com/QaidVoid/kage/commit/eac835ac99d5a7c92452b258c94022b4196c7181))
+- *(remote)* Refuse an unreadable token file instead of rotating it - ([93d1cc9](https://github.com/QaidVoid/kage/commit/93d1cc9ddfaa9baf08416353849360d8ce356b2b))
+- *(rpc)* Emit the config's gemini kind for @ai-sdk/google providers - ([8b3d0b8](https://github.com/QaidVoid/kage/commit/8b3d0b8ffd9c3ffb2ec2cb2c5d6bd51da021d960))
+- *(session)* Report MissingHeader when fork reads a torn first line - ([bc76991](https://github.com/QaidVoid/kage/commit/bc76991872321ba2cab8fe1d24577b132299fab3))
+- *(tools)* Slice read's line range before the byte cap - ([a10336d](https://github.com/QaidVoid/kage/commit/a10336d547c0df4db66181f87482bbd3058b19e6))
+- *(tools)* Vet 6to4 and Teredo embeddings in the ssrf guard - ([88cd4bd](https://github.com/QaidVoid/kage/commit/88cd4bdd2d3d46375f1c980dea3ce936c033bd51))
+- *(tools)* Keep find globs within one path segment - ([aed0dbb](https://github.com/QaidVoid/kage/commit/aed0dbbaf5df1da438f985de3ed3baa01b03b799))
+- *(tools)* Keep the searxng base path when building the search endpoint - ([d829af9](https://github.com/QaidVoid/kage/commit/d829af96243fb9c9dad3b99c4ad9ee794dead34b))
+- *(tui)* Stop the working row repeating the running command - ([9c8bed9](https://github.com/QaidVoid/kage/commit/9c8bed9c3fb94887bb5403b341eb3fe66241a5c9))
+- *(tui)* Stop advertising a draft clear that esc and ctrl+c no longer do - ([29621f1](https://github.com/QaidVoid/kage/commit/29621f16a6cfc1b78b69f83b4aa03bdde7602a05))
+- *(tui)* Hand plugins the session id in kage.session.list - ([2d58696](https://github.com/QaidVoid/kage/commit/2d58696de0edd0cffc39e69ead77d2fb835457fd))
+- Refresh footer context on load, model switch and compaction - ([56a4fef](https://github.com/QaidVoid/kage/commit/56a4fef092c6b07d986fcdd88c47d8366e0553ab))
+
+### Documentation
+
+- *(provider)* Explain what gateway cache detection relies on - ([57f5369](https://github.com/QaidVoid/kage/commit/57f5369f6a38a1ae333ae00f6e6be557b05dd74a))
+
+### Styling
+
+- Rustfmt the second fix batch - ([939da40](https://github.com/QaidVoid/kage/commit/939da40955dec6c1414fca5da7480c2504e8c131))
+
 ## [0.4.0](https://github.com/QaidVoid/kage/compare/v0.3.0...v0.4.0) - 2026-10-19
 
 ### Features

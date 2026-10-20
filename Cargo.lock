@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "kage-acp"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "kage-acp-wire",
  "kage-core",
@@ -3050,7 +3050,7 @@ dependencies = [
 
 [[package]]
 name = "kage-acp-wire"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "kage-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "clap",
@@ -3094,7 +3094,7 @@ dependencies = [
 
 [[package]]
 name = "kage-client"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "kage-acp-wire",
  "kage-core",
@@ -3105,7 +3105,7 @@ dependencies = [
 
 [[package]]
 name = "kage-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -3125,7 +3125,7 @@ dependencies = [
 
 [[package]]
 name = "kage-desktop"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-channel",
  "chrono",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "kage-jsonrpc"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "crossbeam-channel",
  "kage-core",
@@ -3171,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "kage-loop"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "kage-mcp"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "kage-plugin"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "kage-provider"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "crossbeam-channel",
@@ -3241,7 +3241,7 @@ dependencies = [
 
 [[package]]
 name = "kage-remote"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "crossbeam-channel",
  "getrandom 0.4.3",
@@ -3255,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "kage-session"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "chrono",
  "grep",
@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "kage-tools"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "globset",
  "grep",
@@ -3292,7 +3292,7 @@ dependencies = [
 
 [[package]]
 name = "kage-tui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "arboard",
  "base64 0.23.1",
@@ -7763,7 +7763,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "clap",
  "kage-core",
