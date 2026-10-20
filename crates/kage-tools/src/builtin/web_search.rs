@@ -20,15 +20,13 @@ use crate::{Tool, ToolContext, ToolError, schema_for, ssrf};
 /// The variable the Brave Search key is read from by default.
 const BRAVE_KEY_ENV: &str = "BRAVE_API_KEY";
 
-/// Whole-request budget.
-const TIMEOUT: Duration = Duration::from_secs(20);
-
 /// The largest answer page read.
 const MAX_BYTES: u64 = 2_000_000;
 
 /// Results returned when the model asks for no count, and at most.
-const DEFAULT_COUNT: usize = 8;
-const MAX_COUNT: usize = 20;
+/// The `count` doc as derived, before configured limits replace its
+/// numbers.
+pub(super) const DEFAULT_COUNT_DOC: &str = "Defaults to 8, at most 20.";
 
 /// Input shape for the `web_search` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -76,7 +74,17 @@ impl Tool for WebSearchTool {
     }
 
     fn schema(&self) -> serde_json::Value {
-        schema_for::<WebSearchInput>()
+        let mut schema = schema_for::<WebSearchInput>();
+        crate::schema::retarget_property_doc(
+            &mut schema,
+            "count",
+            DEFAULT_COUNT_DOC,
+            &format!(
+                "Defaults to {}, at most {}.",
+                self.config.count, self.config.max_count
+            ),
+        );
+        schema
     }
 
     fn risk(&self) -> Risk {
@@ -96,16 +104,20 @@ impl Tool for WebSearchTool {
         if cx.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
-        let count = input.count.unwrap_or(DEFAULT_COUNT).clamp(1, MAX_COUNT);
+        let count = input
+            .count
+            .unwrap_or(self.config.count)
+            .clamp(1, self.config.max_count.max(1));
+        let timeout = Duration::from_millis(self.config.timeout_ms);
         let mut results = match self.config.engine {
-            SearchEngine::Duckduckgo => duckduckgo(query)?,
+            SearchEngine::Duckduckgo => duckduckgo(query, timeout)?,
             SearchEngine::Searxng => {
                 let base = self.config.url.as_deref().ok_or_else(|| {
                     ToolError::Other(
                         "[tools.web_search] engine = \"searxng\" needs a url".to_owned(),
                     )
                 })?;
-                searxng(base, query)?
+                searxng(base, query, timeout)?
             }
             SearchEngine::Brave => {
                 let env = self.config.api_key_env.as_deref().unwrap_or(BRAVE_KEY_ENV);
@@ -115,7 +127,7 @@ impl Tool for WebSearchTool {
                     .ok_or_else(|| {
                         ToolError::Other(format!("Brave Search needs a key: {env} is not set"))
                     })?;
-                brave(&key, query, count)?
+                brave(&key, query, count, timeout)?
             }
         };
         results.truncate(count);
@@ -145,10 +157,10 @@ fn output(query: &str, results: &[SearchResult]) -> ToolOutput {
     }
 }
 
-fn get(url: &url::Url, headers: &[(&str, &str)]) -> Result<String, ToolError> {
+fn get(url: &url::Url, headers: &[(&str, &str)], timeout: Duration) -> Result<String, ToolError> {
     let agent = ssrf::agent_for_url(
         ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
+            .timeout_global(Some(timeout))
             .http_status_as_error(false),
         url,
     )?;
@@ -192,10 +204,10 @@ fn error_detail(body: &str) -> Option<String> {
     .find_map(|detail| detail.as_str().map(str::to_owned))
 }
 
-fn duckduckgo(query: &str) -> Result<Vec<SearchResult>, ToolError> {
+fn duckduckgo(query: &str, timeout: Duration) -> Result<Vec<SearchResult>, ToolError> {
     let mut url = url::Url::parse("https://html.duckduckgo.com/html/").expect("static url");
     url.query_pairs_mut().append_pair("q", query);
-    let page = get(&url, &[])?;
+    let page = get(&url, &[], timeout)?;
     let results = parse_duckduckgo(&page);
     if results.is_empty() && page.contains("anomaly") {
         return Err(ToolError::Other(
@@ -320,13 +332,13 @@ fn searxng_url(base: &str, query: &str) -> Result<url::Url, String> {
     Ok(endpoint)
 }
 
-fn searxng(base: &str, query: &str) -> Result<Vec<SearchResult>, ToolError> {
+fn searxng(base: &str, query: &str, timeout: Duration) -> Result<Vec<SearchResult>, ToolError> {
     let url = searxng_url(base, query).map_err(ToolError::Other)?;
     let endpoint = match url.host_str() {
         Some(host) => format!("{host}{}", url.path()),
         None => "the SearXNG instance".to_owned(),
     };
-    let body = get(&url, &[])?;
+    let body = get(&url, &[], timeout)?;
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|_| {
         ToolError::Other(format!(
             "{endpoint} did not answer with JSON; enable the json format in its settings"
@@ -349,7 +361,12 @@ fn searxng(base: &str, query: &str) -> Result<Vec<SearchResult>, ToolError> {
         .unwrap_or_default())
 }
 
-fn brave(key: &str, query: &str, count: usize) -> Result<Vec<SearchResult>, ToolError> {
+fn brave(
+    key: &str,
+    query: &str,
+    count: usize,
+    timeout: Duration,
+) -> Result<Vec<SearchResult>, ToolError> {
     let mut url =
         url::Url::parse("https://api.search.brave.com/res/v1/web/search").expect("static url");
     url.query_pairs_mut()
@@ -361,6 +378,7 @@ fn brave(key: &str, query: &str, count: usize) -> Result<Vec<SearchResult>, Tool
             ("accept", "application/json"),
             ("x-subscription-token", key),
         ],
+        timeout,
     )?;
     let json: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| ToolError::Other(format!("Brave Search answered something else: {e}")))?;
@@ -427,6 +445,7 @@ mod tests {
             engine: kage_core::config::SearchEngine::Brave,
             url: None,
             api_key_env: Some("KAGE_TEST_UNSET_BRAVE_KEY".into()),
+            ..Default::default()
         });
         let cancel = kage_core::CancelFlag::new();
         let err = tool
@@ -487,7 +506,11 @@ mod tests {
     #[test]
     #[ignore = "reaches the network"]
     fn duckduckgo_answers_with_results() {
-        let results = super::duckduckgo("rust programming language").unwrap();
+        let results = super::duckduckgo(
+            "rust programming language",
+            std::time::Duration::from_secs(20),
+        )
+        .unwrap();
         assert!(results.len() >= 3, "{results:?}");
         assert!(
             results.iter().all(|r| r.url.starts_with("http")),

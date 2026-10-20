@@ -31,6 +31,7 @@ pub mod sync;
 pub mod templates;
 pub mod thinking;
 pub mod tool_spec;
+pub mod tools_config;
 pub mod trust;
 
 pub use agents::{AgentDef, AgentDefs, AgentError, AgentSource, load_agent_file, load_agents_dir};

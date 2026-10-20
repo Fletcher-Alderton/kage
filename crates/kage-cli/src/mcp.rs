@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use kage_core::config::{Config, McpConfig, McpServer, ShellConfig};
+use kage_core::config::{Config, McpConfig, McpServer, ShellConfig, ToolsConfig};
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
@@ -59,7 +59,7 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
             "kage: path confinement is OFF for this session (permissions.confine_paths = false)"
         );
     }
-    let registry = match serve_registry(tools, &shell, &config.tools.rename) {
+    let registry = match serve_registry(tools, &shell, &config.tools) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("kage: mcp serve: {e}");
@@ -83,20 +83,25 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
     }
 }
 
-/// The built-in registry reduced to `tools`.
+/// The built-in registry, as `[tools]` and `[shell]` configure it,
+/// reduced to `tools`.
 ///
 /// # Errors
 ///
-/// A message naming the first unknown tool and the known ones.
+/// A message naming the first unknown or disabled tool and the known
+/// ones.
 fn serve_registry(
     tools: &[String],
     shell: &ShellConfig,
-    renames: &BTreeMap<String, String>,
+    config: &ToolsConfig,
 ) -> Result<ToolRegistry, String> {
-    let registry = kage_tools::builtin_registry()
-        .with_shell_config(shell)
-        .with_renames(renames);
+    let registry = kage_tools::configured_registry(config, shell);
     let wanted: Vec<String> = tools.iter().map(|t| t.trim().to_owned()).collect();
+    if let Some(off) = wanted.iter().find(|t| registry.is_disabled(t)) {
+        return Err(format!(
+            "tool `{off}` in --tools is disabled ([tools.{off}] enabled = false)"
+        ));
+    }
     // The known set is the full registry, captured before the
     // narrowing: the message exists to tell the user what they could
     // have written.
@@ -337,7 +342,7 @@ mod tests {
 
     use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
 
-    use kage_core::config::ShellConfig;
+    use kage_core::config::{ShellConfig, ToolsConfig};
 
     use super::{SamplingHandler, merge_extra, serve_registry, serve_verdict};
 
@@ -379,12 +384,34 @@ mod tests {
         );
     }
 
+    fn renamed(rename: BTreeMap<String, String>) -> ToolsConfig {
+        ToolsConfig {
+            rename,
+            ..ToolsConfig::default()
+        }
+    }
+
+    #[test]
+    fn serve_registry_refuses_a_disabled_tool_and_applies_limits() {
+        let config: ToolsConfig =
+            toml::from_str("[grep]\nenabled = false\n[read]\ndescription = \"Read it.\"\n")
+                .unwrap();
+        let err = serve_registry(&names(&["read", "grep"]), &ShellConfig::default(), &config)
+            .unwrap_err();
+        assert!(
+            err.contains("`grep`") && err.contains("enabled = false"),
+            "{err}"
+        );
+        let reg = serve_registry(&names(&["read"]), &ShellConfig::default(), &config).unwrap();
+        assert_eq!(reg.list_for_provider()[0].description, "Read it.");
+    }
+
     #[test]
     fn serve_registry_keeps_only_listed_tools() {
         let reg = serve_registry(
             &names(&["read", "ls"]),
             &ShellConfig::default(),
-            &BTreeMap::new(),
+            &ToolsConfig::default(),
         )
         .unwrap();
         let mut listed: Vec<&str> = reg.names().collect();
@@ -396,7 +423,12 @@ mod tests {
     #[test]
     fn serve_registry_applies_renames_to_the_advertised_names() {
         let renames = BTreeMap::from([("shell".to_owned(), "run_command".to_owned())]);
-        let reg = serve_registry(&names(&["shell"]), &ShellConfig::default(), &renames).unwrap();
+        let reg = serve_registry(
+            &names(&["shell"]),
+            &ShellConfig::default(),
+            &renamed(renames),
+        )
+        .unwrap();
         let listed: Vec<String> = reg
             .list_for_provider()
             .into_iter()
@@ -408,8 +440,12 @@ mod tests {
     #[test]
     fn serve_registry_keeps_a_tool_named_by_its_advertised_name() {
         let renames = BTreeMap::from([("shell".to_owned(), "run_command".to_owned())]);
-        let reg =
-            serve_registry(&names(&["run_command"]), &ShellConfig::default(), &renames).unwrap();
+        let reg = serve_registry(
+            &names(&["run_command"]),
+            &ShellConfig::default(),
+            &renamed(renames),
+        )
+        .unwrap();
         let listed: Vec<String> = reg
             .list_for_provider()
             .into_iter()
@@ -423,7 +459,7 @@ mod tests {
         let err = serve_registry(
             &names(&["read", "nope"]),
             &ShellConfig::default(),
-            &BTreeMap::new(),
+            &ToolsConfig::default(),
         )
         .unwrap_err();
         assert!(err.contains("`nope`"), "{err}");

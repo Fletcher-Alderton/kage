@@ -5,7 +5,8 @@
 //! loopback, link-local, or otherwise non-routable range. The same check
 //! runs on every DNS resolution the HTTP agent performs, so a redirect or a
 //! rebinding DNS answer cannot reach such an address either. Each fetch is
-//! bounded by `TIMEOUT` and at most `MAX_REDIRECTS` redirects.
+//! bounded by `[tools.web_fetch] timeout_ms` and at most
+//! `max_redirects` redirects.
 
 use std::fmt::Write as _;
 use std::io::Read;
@@ -18,18 +19,10 @@ use serde::Deserialize;
 use crate::ssrf;
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
-const DEFAULT_MAX_BYTES: u64 = 2_000_000;
-
-/// Hard ceiling on the body kept regardless of what the model asks
-/// for: the body lands in the conversation context, so an unbounded
-/// model-controlled cap could pull arbitrary amounts of data in.
-const ABSOLUTE_MAX_BYTES: u64 = 5_000_000;
-
-/// Whole-request budget: resolving, connecting, redirects, and the body.
-const TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Redirects followed before the fetch fails.
-const MAX_REDIRECTS: u32 = 5;
+/// The `max_bytes` doc as derived, before configured limits replace
+/// its numbers.
+pub(super) const DEFAULT_MAX_BYTES_DOC: &str =
+    "Defaults to 2,000,000 and is\nhard-capped at 5,000,000.";
 
 /// Input shape for the `web_fetch` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -43,23 +36,83 @@ struct WebFetchInput {
 }
 
 /// Fetch an HTTP(S) URL and return readable text.
-#[derive(Debug, Default)]
-pub struct WebFetchTool;
+///
+/// The body budget is `max_bytes` unless the call asks for another,
+/// never above `max_bytes_limit`: the body lands in the conversation
+/// context, so an unbounded model-controlled cap could pull arbitrary
+/// amounts of data in. `timeout` is the whole-request budget:
+/// resolving, connecting, redirects, and the body.
+#[derive(Debug)]
+pub struct WebFetchTool {
+    max_bytes: u64,
+    max_bytes_limit: u64,
+    timeout: Duration,
+    max_redirects: u32,
+    description: String,
+}
+
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self::new(&kage_core::config::WebFetchToolConfig::default())
+    }
+}
+
+impl WebFetchTool {
+    /// A `web_fetch` tool with the limits `[tools.web_fetch]` sets.
+    #[must_use]
+    pub fn new(cfg: &kage_core::config::WebFetchToolConfig) -> Self {
+        Self {
+            max_bytes: cfg.max_bytes,
+            max_bytes_limit: cfg.max_bytes_limit,
+            timeout: Duration::from_millis(cfg.timeout_ms),
+            max_redirects: cfg.max_redirects,
+            description: format!(
+                "Fetch an HTTP(S) URL and return its body as readable text. HTML is \
+                 stripped to plain text. Refuses to fetch private, loopback, or \
+                 link-local addresses. Body is capped at {} by default, {} at \
+                 most.",
+                super::human_bytes(cfg.max_bytes),
+                super::human_bytes(cfg.max_bytes_limit)
+            ),
+        }
+    }
+}
+
+/// `n` with thousands separators, as the schema doc writes it.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
 
 impl Tool for WebFetchTool {
     fn name(&self) -> &'static str {
         "web_fetch"
     }
 
-    fn description(&self) -> &'static str {
-        "Fetch an HTTP(S) URL and return its body as readable text. HTML is \
-         stripped to plain text. Refuses to fetch private, loopback, or \
-         link-local addresses. Body is capped at 2MB by default, 5MB at \
-         most."
+    fn description(&self) -> &str {
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
-        schema_for::<WebFetchInput>()
+        let mut schema = schema_for::<WebFetchInput>();
+        crate::schema::retarget_property_doc(
+            &mut schema,
+            "max_bytes",
+            DEFAULT_MAX_BYTES_DOC,
+            &format!(
+                "Defaults to {} and is\nhard-capped at {}.",
+                grouped(self.max_bytes),
+                grouped(self.max_bytes_limit)
+            ),
+        );
+        schema
     }
 
     fn risk(&self) -> Risk {
@@ -86,30 +139,36 @@ impl Tool for WebFetchTool {
                 )));
             }
         }
-        let max_bytes = effective_max_bytes(input.max_bytes);
-        let agent = ssrf::agent_for_url(agent_config(TIMEOUT), &parsed)?;
-        fetch(&agent, &parsed, max_bytes)
+        let max_bytes = effective_max_bytes(input.max_bytes, self.max_bytes, self.max_bytes_limit);
+        let agent = ssrf::agent_for_url(agent_config(self.timeout, self.max_redirects), &parsed)?;
+        fetch(&agent, &parsed, max_bytes, self.max_redirects)
     }
 }
 
 /// The agent configuration web fetches share: one whole-request budget
 /// and the redirect cap. The proxy decision and SSRF vet ride in
 /// [`ssrf::agent_for_url`].
-fn agent_config(timeout: Duration) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+fn agent_config(
+    timeout: Duration,
+    max_redirects: u32,
+) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
-        .max_redirects(MAX_REDIRECTS)
+        .max_redirects(max_redirects)
 }
 
-/// The body budget in effect: the model's request, never above the
-/// absolute ceiling.
-fn effective_max_bytes(requested: Option<u64>) -> u64 {
-    requested
-        .unwrap_or(DEFAULT_MAX_BYTES)
-        .min(ABSOLUTE_MAX_BYTES)
+/// The body budget in effect: the model's request, else `default`,
+/// never above `limit`.
+fn effective_max_bytes(requested: Option<u64>, default: u64, limit: u64) -> u64 {
+    requested.unwrap_or(default).min(limit)
 }
 
-fn fetch(agent: &ureq::Agent, parsed: &url::Url, max_bytes: u64) -> Result<ToolOutput, ToolError> {
+fn fetch(
+    agent: &ureq::Agent,
+    parsed: &url::Url,
+    max_bytes: u64,
+    max_redirects: u32,
+) -> Result<ToolOutput, ToolError> {
     let response = agent
         .get(parsed.as_str())
         .header("user-agent", "kage/0.1 (+https://github.com/QaidVoid/kage)")
@@ -123,7 +182,7 @@ fn fetch(agent: &ureq::Agent, parsed: &url::Url, max_bytes: u64) -> Result<ToolO
             }
             ureq::Error::Timeout(_) => ToolError::Other(format!("{} timed out", parsed.as_str())),
             ureq::Error::TooManyRedirects => ToolError::Other(format!(
-                "{} redirected more than {MAX_REDIRECTS} times",
+                "{} redirected more than {max_redirects} times",
                 parsed.as_str()
             )),
             other => ToolError::Other(format!("transport error: {other}")),
@@ -178,6 +237,10 @@ fn fetch(agent: &ureq::Agent, parsed: &url::Url, max_bytes: u64) -> Result<ToolO
 
 #[cfg(test)]
 mod tests {
+    /// The default `[tools.web_fetch]` limits.
+    const DEFAULT_MAX_BYTES: u64 = 2_000_000;
+    const ABSOLUTE_MAX_BYTES: u64 = 5_000_000;
+    const MAX_REDIRECTS: u32 = 5;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{SocketAddr, TcpListener};
     use std::time::Instant;
@@ -186,7 +249,7 @@ mod tests {
 
     #[test]
     fn rejects_non_http_scheme() {
-        let err = WebFetchTool
+        let err = WebFetchTool::default()
             .execute(
                 serde_json::json!({"url": "file:///etc/passwd"}),
                 &ToolContext::new(std::path::Path::new("/tmp"), &kage_core::CancelFlag::new()),
@@ -197,7 +260,7 @@ mod tests {
 
     #[test]
     fn rejects_private_url() {
-        let err = WebFetchTool
+        let err = WebFetchTool::default()
             .execute(
                 serde_json::json!({"url": "http://127.0.0.1:8080/x"}),
                 &ToolContext::new(std::path::Path::new("/tmp"), &kage_core::CancelFlag::new()),
@@ -259,9 +322,10 @@ mod tests {
         timeout: Duration,
         max_bytes: u64,
     ) -> Result<ToolOutput, ToolError> {
-        let agent = ssrf::guarded_agent_allowing(agent_config(timeout).build(), addr);
+        let agent =
+            ssrf::guarded_agent_allowing(agent_config(timeout, MAX_REDIRECTS).build(), addr);
         let url = url::Url::parse(&format!("http://{addr}{path}")).unwrap();
-        fetch(&agent, &url, max_bytes)
+        fetch(&agent, &url, max_bytes, MAX_REDIRECTS)
     }
 
     #[test]
@@ -317,13 +381,26 @@ mod tests {
 
     #[test]
     fn requested_caps_clamp_to_the_absolute_ceiling() {
-        assert_eq!(effective_max_bytes(None), DEFAULT_MAX_BYTES);
-        assert_eq!(effective_max_bytes(Some(1_000)), 1_000);
         assert_eq!(
-            effective_max_bytes(Some(ABSOLUTE_MAX_BYTES)),
+            effective_max_bytes(None, DEFAULT_MAX_BYTES, ABSOLUTE_MAX_BYTES),
+            DEFAULT_MAX_BYTES
+        );
+        assert_eq!(
+            effective_max_bytes(Some(1_000), DEFAULT_MAX_BYTES, ABSOLUTE_MAX_BYTES),
+            1_000
+        );
+        assert_eq!(
+            effective_max_bytes(
+                Some(ABSOLUTE_MAX_BYTES),
+                DEFAULT_MAX_BYTES,
+                ABSOLUTE_MAX_BYTES
+            ),
             ABSOLUTE_MAX_BYTES
         );
-        assert_eq!(effective_max_bytes(Some(u64::MAX)), ABSOLUTE_MAX_BYTES);
+        assert_eq!(
+            effective_max_bytes(Some(u64::MAX), DEFAULT_MAX_BYTES, ABSOLUTE_MAX_BYTES),
+            ABSOLUTE_MAX_BYTES
+        );
     }
 
     #[test]
@@ -331,7 +408,7 @@ mod tests {
         let capped_len = usize::try_from(ABSOLUTE_MAX_BYTES).unwrap();
         let body = "x".repeat(capped_len + 1024);
         let addr = serve(move |_, _| ok(&body));
-        let cap = effective_max_bytes(Some(u64::MAX));
+        let cap = effective_max_bytes(Some(u64::MAX), DEFAULT_MAX_BYTES, ABSOLUTE_MAX_BYTES);
         let out = fetch_capped(addr, "/big", Duration::from_secs(30), cap).unwrap();
         assert_eq!(
             out.structured.unwrap()["truncated"],

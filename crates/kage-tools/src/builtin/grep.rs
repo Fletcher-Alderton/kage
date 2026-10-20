@@ -15,13 +15,12 @@ use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
-const DEFAULT_MAX_MATCHES: u64 = 1_000;
-/// The most characters of one matching line the output keeps. Minified
-/// bundles put a whole file on one line, so a single hit could otherwise
-/// carry megabytes.
-const MAX_LINE_CHARS: usize = 300;
 /// Characters of context kept before the match in a cut line.
 const LEAD_CHARS: usize = 100;
+
+/// The `max_matches` doc as derived, before a configured default
+/// replaces its number.
+pub(super) const DEFAULT_MATCHES_DOC: &str = "Defaults to 1000.";
 
 /// Input shape for the `grep` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -40,23 +39,57 @@ struct GrepInput {
 }
 
 /// Recursive regex search.
-#[derive(Debug, Default)]
-pub struct GrepTool;
+#[derive(Debug)]
+pub struct GrepTool {
+    /// Matches returned when the call sets no `max_matches`.
+    max_matches: u64,
+    /// Characters kept of one matching line.
+    max_line_chars: usize,
+    description: String,
+}
+
+impl Default for GrepTool {
+    fn default() -> Self {
+        Self::new(&kage_core::config::GrepToolConfig::default())
+    }
+}
+
+impl GrepTool {
+    /// A `grep` tool with the limits `[tools.grep]` sets.
+    #[must_use]
+    pub fn new(cfg: &kage_core::config::GrepToolConfig) -> Self {
+        Self {
+            max_matches: cfg.max_matches,
+            max_line_chars: cfg.max_line_chars,
+            description: format!(
+                "Recursively search files for a regex pattern. Honors \
+                 `.gitignore` and `.kageignore`; skips dotfiles and binary \
+                 files (a file stops at its first NUL byte). Returns lines as \
+                 `path:line:text`. Capped at {} matches by default.",
+                cfg.max_matches
+            ),
+        }
+    }
+}
 
 impl Tool for GrepTool {
     fn name(&self) -> &'static str {
         "grep"
     }
 
-    fn description(&self) -> &'static str {
-        "Recursively search files for a regex pattern. Honors \
-         `.gitignore` and `.kageignore`; skips dotfiles and binary \
-         files (a file stops at its first NUL byte). Returns lines as \
-         `path:line:text`. Capped at 1000 matches by default."
+    fn description(&self) -> &str {
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
-        schema_for::<GrepInput>()
+        let mut schema = schema_for::<GrepInput>();
+        crate::schema::retarget_property_doc(
+            &mut schema,
+            "max_matches",
+            DEFAULT_MATCHES_DOC,
+            &format!("Defaults to {}.", self.max_matches),
+        );
+        schema
     }
 
     fn risk(&self) -> Risk {
@@ -74,7 +107,7 @@ impl Tool for GrepTool {
             None => cx.workdir().to_path_buf(),
         };
         std::fs::metadata(&root).map_err(ToolError::io_at("search", &root))?;
-        let max = input.max_matches.unwrap_or(DEFAULT_MAX_MATCHES).max(1);
+        let max = input.max_matches.unwrap_or(self.max_matches).max(1);
 
         let matcher = RegexMatcherBuilder::new()
             .case_insensitive(input.ignore_case)
@@ -109,6 +142,7 @@ impl Tool for GrepTool {
                 hits: &mut hits,
                 total: &mut total,
                 max,
+                max_line_chars: self.max_line_chars,
                 path: &path,
                 root: &root,
                 hit_cap: false,
@@ -147,6 +181,7 @@ struct MatchSink<'a> {
     hits: &'a mut Vec<Hit>,
     total: &'a mut u64,
     max: u64,
+    max_line_chars: usize,
     path: &'a Path,
     root: &'a Path,
     hit_cap: bool,
@@ -165,7 +200,7 @@ impl Sink for MatchSink<'_> {
             .ok()
             .flatten()
             .map_or(0, |found| found.start());
-        let text = clip_line(mat.bytes(), at);
+        let text = clip_line(mat.bytes(), at, self.max_line_chars);
         let rel =
             kage_core::fsutil::slashed(self.path.strip_prefix(self.root).unwrap_or(self.path));
         self.hits.push(Hit {
@@ -178,25 +213,25 @@ impl Sink for MatchSink<'_> {
     }
 }
 
-/// The matching line as text, cut to [`MAX_LINE_CHARS`] around the
-/// match starting at byte `at` when it is longer, with markers saying how
-/// much was cut on each side.
-fn clip_line(bytes: &[u8], at: usize) -> String {
+/// The matching line as text, cut to `max_chars` around the match
+/// starting at byte `at` when it is longer, with markers saying how much
+/// was cut on each side. Up to [`LEAD_CHARS`] (a third of a short cap)
+/// of context stay before the match.
+fn clip_line(bytes: &[u8], at: usize, max_chars: usize) -> String {
+    let lead = LEAD_CHARS.min(max_chars / 3);
     let full = String::from_utf8_lossy(bytes);
     let full = full.trim_end();
     let count = full.chars().count();
-    if count <= MAX_LINE_CHARS {
+    if count <= max_chars {
         return full.to_owned();
     }
     let at_char = full
         .char_indices()
         .take_while(|(byte, _)| *byte < at)
         .count();
-    let start = at_char
-        .saturating_sub(LEAD_CHARS)
-        .min(count - MAX_LINE_CHARS);
-    let end = start + MAX_LINE_CHARS;
-    let window: String = full.chars().skip(start).take(MAX_LINE_CHARS).collect();
+    let start = at_char.saturating_sub(lead).min(count - max_chars);
+    let end = start + max_chars;
+    let window: String = full.chars().skip(start).take(max_chars).collect();
     let before = if start > 0 {
         format!("[+{start} chars] ")
     } else {
@@ -238,7 +273,7 @@ mod tests {
     fn run(workdir: &Path, input: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
-        GrepTool.execute(input, &cx)
+        GrepTool::default().execute(input, &cx)
     }
 
     fn populate(dir: &Path) {

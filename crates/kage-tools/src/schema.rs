@@ -24,6 +24,28 @@ pub fn schema_for<T: JsonSchema>() -> serde_json::Value {
     value
 }
 
+/// Point the doc text of property `key` at a configured default: every
+/// `from` in its description becomes `to`. A tool whose limit is set in
+/// `[tools.<name>]` uses this so the schema the model reads states the
+/// value actually in effect. Unchanged when the property is missing.
+pub(crate) fn retarget_property_doc(
+    schema: &mut serde_json::Value,
+    key: &str,
+    from: &str,
+    to: &str,
+) {
+    if from == to {
+        return;
+    }
+    if let Some(serde_json::Value::String(text)) = schema
+        .get_mut("properties")
+        .and_then(|p| p.get_mut(key))
+        .and_then(|p| p.get_mut("description"))
+    {
+        *text = text.replace(from, to);
+    }
+}
+
 /// Serialize a derived schema, falling back to a permissive
 /// `{"type": "object"}` when serialization fails.
 fn serialize_schema(schema: impl serde::Serialize) -> serde_json::Value {

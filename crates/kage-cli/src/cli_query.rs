@@ -8,7 +8,6 @@ use std::sync::Arc;
 use kage_core::{Content, Message, Role};
 use kage_loop::AgentContext;
 use kage_session::{SessionId, SessionWriter};
-use kage_tools::builtin_registry;
 
 use crate::cli_loop_run::execute_print_run;
 use crate::plugins::setup_runtime;
@@ -113,7 +112,7 @@ pub(crate) fn run_resume(
         }
     };
     let layered = kage_core::config::Config::load_layered(&workdir).unwrap_or_default();
-    let mut tools = builtin_registry().with_renames(&layered.tools.rename);
+    let mut tools = kage_tools::configured_registry(&layered.tools, &layered.shell);
     let (mcp_manager, mcp_errors) =
         mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
     for (server, err) in mcp_errors {

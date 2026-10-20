@@ -17,14 +17,17 @@ use serde::Deserialize;
 
 use crate::{ExecMode, Tool, ToolContext, ToolError, resolve, schema_for};
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// The shell the tool runs commands with when none is configured.
 #[cfg(unix)]
 pub const DEFAULT_SHELL: &str = "bash";
 /// The shell the tool runs commands with when none is configured.
 #[cfg(not(unix))]
 pub const DEFAULT_SHELL: &str = "pwsh";
-const MAX_STREAM_BYTES: usize = 100_000;
+/// The bytes [`run`] keeps of each stream.
+pub const MAX_STREAM_BYTES: usize = 100_000;
+/// The `timeout_ms` doc as derived, before a configured default
+/// replaces its number.
+pub(super) const DEFAULT_TIMEOUT_DOC: &str = "Defaults to 120000 (2 minutes).";
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const TAIL_BYTES: usize = 4_096;
@@ -79,15 +82,15 @@ pub struct ShellTool {
     shell: String,
     description: String,
     env_scrub: Arc<[String]>,
+    /// Timeout of a command whose call sets none.
+    timeout_ms: u64,
+    /// Bytes kept of each of stdout and stderr.
+    max_output_bytes: usize,
 }
 
 impl Default for ShellTool {
     fn default() -> Self {
-        Self {
-            shell: DEFAULT_SHELL.to_owned(),
-            description: describe_shell(DEFAULT_SHELL),
-            env_scrub: Arc::from([]),
-        }
+        Self::new(&kage_core::config::ShellToolConfig::default())
     }
 }
 
@@ -95,11 +98,13 @@ impl Default for ShellTool {
 /// model writes commands in that shell's syntax. Models default to
 /// bash constructs no matter what the tool says, so shells that are
 /// not bash get an explicit contrast note with the common translations.
-fn describe_shell(shell: &str) -> String {
+fn describe_shell(shell: &str, timeout_ms: u64, max_output_bytes: usize) -> String {
     let flags = shell_args(shell).join(" ");
     let mut out = format!(
         "Run a shell command via `{shell} {flags}`. Returns combined stdout/stderr and the \
-         exit code. Default timeout is 120 seconds; output is truncated at 100KB."
+         exit code. Default timeout is {}; output is truncated at {}.",
+        super::human_ms(timeout_ms),
+        super::human_bytes(max_output_bytes as u64)
     );
     match shell.trim_end_matches(".exe") {
         "fish" => out.push_str(
@@ -131,6 +136,19 @@ fn shell_args(program: &str) -> &'static [&'static str] {
 }
 
 impl ShellTool {
+    /// A `shell` tool with the limits `[tools.shell]` sets, running
+    /// commands with [`DEFAULT_SHELL`] until [`Self::with_shell`].
+    #[must_use]
+    pub fn new(cfg: &kage_core::config::ShellToolConfig) -> Self {
+        Self {
+            shell: DEFAULT_SHELL.to_owned(),
+            description: describe_shell(DEFAULT_SHELL, cfg.timeout_ms, cfg.max_output_bytes),
+            env_scrub: Arc::from([]),
+            timeout_ms: cfg.timeout_ms,
+            max_output_bytes: cfg.max_output_bytes,
+        }
+    }
+
     /// Glob patterns of environment variables to strip from the shell
     /// child's environment, so a model-authored command cannot read
     /// variables the user withheld. Patterns match the whole variable
@@ -149,7 +167,7 @@ impl ShellTool {
     pub fn with_shell(mut self, shell: Option<&str>) -> Self {
         if let Some(shell) = shell {
             shell.clone_into(&mut self.shell);
-            self.description = describe_shell(&self.shell);
+            self.description = describe_shell(&self.shell, self.timeout_ms, self.max_output_bytes);
         }
         self
     }
@@ -165,7 +183,16 @@ impl Tool for ShellTool {
     }
 
     fn schema(&self) -> serde_json::Value {
-        schema_for::<ShellInput>()
+        let mut schema = schema_for::<ShellInput>();
+        if self.timeout_ms != kage_core::config::ShellToolConfig::default().timeout_ms {
+            crate::schema::retarget_property_doc(
+                &mut schema,
+                "timeout_ms",
+                DEFAULT_TIMEOUT_DOC,
+                &format!("Defaults to {}.", self.timeout_ms),
+            );
+        }
+        schema
     }
 
     fn risk(&self) -> Risk {
@@ -182,7 +209,7 @@ impl Tool for ShellTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: ShellInput = serde_json::from_value(input)?;
-        let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+        let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(self.timeout_ms));
         let cwd = match &input.cwd {
             Some(c) => resolve(cx.workdir(), Path::new(c))?,
             None => cx.workdir().to_path_buf(),
@@ -193,6 +220,7 @@ impl Tool for ShellTool {
             timeout,
             &self.env_scrub,
             &self.shell,
+            self.max_output_bytes,
             cx,
         )
     }
@@ -264,6 +292,31 @@ pub fn run(
     shell: &str,
     cx: &ToolContext<'_>,
 ) -> Result<CommandOutput, ToolError> {
+    run_capped(
+        command,
+        cwd,
+        timeout,
+        env_scrub,
+        shell,
+        MAX_STREAM_BYTES,
+        cx,
+    )
+}
+
+/// [`run`] keeping at most `max_bytes` of each stream.
+///
+/// # Errors
+///
+/// As [`run`].
+pub fn run_capped(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    env_scrub: &[String],
+    shell: &str,
+    max_bytes: usize,
+    cx: &ToolContext<'_>,
+) -> Result<CommandOutput, ToolError> {
     if !cwd.exists() {
         return Err(ToolError::Other(format!(
             "working directory {} does not exist",
@@ -294,8 +347,8 @@ pub fn run(
     let tail = Arc::new(Mutex::new(Tail::default()));
     let stdout_tail = Arc::clone(&tail);
     let stderr_tail = Arc::clone(&tail);
-    let stdout_handle = thread::spawn(move || read_capped(&mut stdout, &stdout_tail));
-    let stderr_handle = thread::spawn(move || read_capped(&mut stderr, &stderr_tail));
+    let stdout_handle = thread::spawn(move || read_capped(&mut stdout, &stdout_tail, max_bytes));
+    let stderr_handle = thread::spawn(move || read_capped(&mut stderr, &stderr_tail, max_bytes));
 
     let watch = cx.cancel_flag().watch();
     let start = Instant::now();
@@ -351,6 +404,7 @@ fn run_command(
     timeout: Duration,
     env_scrub: &[String],
     shell: &str,
+    max_bytes: usize,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolError> {
     let CommandOutput {
@@ -359,7 +413,8 @@ fn run_command(
         stderr,
         stderr_truncated,
         exit_code,
-    } = run(command, cwd, timeout, env_scrub, shell, cx)?;
+    } = run_capped(command, cwd, timeout, env_scrub, shell, max_bytes, cx)?;
+    let cap = super::human_bytes(max_bytes as u64);
     let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
     let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
 
@@ -368,7 +423,7 @@ fn run_command(
         text.push_str("stdout:\n");
         text.push_str(&stdout_text);
         if stdout_truncated {
-            text.push_str("\n[... stdout truncated at 100KB ...]");
+            let _ = write!(text, "\n[... stdout truncated at {cap} ...]");
         }
         if !stderr_text.is_empty() {
             text.push('\n');
@@ -378,7 +433,7 @@ fn run_command(
         text.push_str("stderr:\n");
         text.push_str(&stderr_text);
         if stderr_truncated {
-            text.push_str("\n[... stderr truncated at 100KB ...]");
+            let _ = write!(text, "\n[... stderr truncated at {cap} ...]");
         }
     }
     if text.is_empty() {
@@ -491,10 +546,10 @@ fn attach_job(child: &std::process::Child) -> Result<win32job::Job, win32job::Jo
     Ok(job)
 }
 
-/// Read `reader` to EOF, keeping at most [`MAX_STREAM_BYTES`] and feeding
-/// every chunk to `tail`. Reading continues past the cap so the command
-/// never blocks on a full pipe.
-fn read_capped<R: Read>(reader: &mut R, tail: &Mutex<Tail>) -> (Vec<u8>, bool) {
+/// Read `reader` to EOF, keeping at most `max_bytes` and feeding every
+/// chunk to `tail`. Reading continues past the cap so the command never
+/// blocks on a full pipe.
+fn read_capped<R: Read>(reader: &mut R, tail: &Mutex<Tail>, max_bytes: usize) -> (Vec<u8>, bool) {
     let mut buf = Vec::with_capacity(4_096);
     let mut chunk = [0u8; 8_192];
     let mut truncated = false;
@@ -504,7 +559,7 @@ fn read_capped<R: Read>(reader: &mut R, tail: &Mutex<Tail>) -> (Vec<u8>, bool) {
             Ok(n) => n,
         };
         lock(tail).push(&chunk[..n]);
-        let room = MAX_STREAM_BYTES - buf.len();
+        let room = max_bytes - buf.len();
         if n > room {
             truncated = true;
         }
@@ -896,7 +951,7 @@ mod tests {
         );
         assert_eq!(
             ShellTool::default().description(),
-            describe_shell(DEFAULT_SHELL)
+            describe_shell(DEFAULT_SHELL, 120_000, MAX_STREAM_BYTES)
         );
     }
 

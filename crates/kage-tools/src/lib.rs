@@ -12,9 +12,9 @@ pub mod schema;
 pub mod ssrf;
 pub mod tool;
 
-pub use builtin::builtin_registry;
+pub use builtin::{builtin_registry, configured_registry};
 pub use error::ToolError;
 pub use path::{resolve, resolve_under};
-pub use registry::ToolRegistry;
+pub use registry::{ToolOverrides, ToolRegistry};
 pub use schema::schema_for;
 pub use tool::{ExecMode, ProgressSink, Tool, ToolContext};

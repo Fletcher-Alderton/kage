@@ -17,7 +17,7 @@ use kage_core::sync::lock;
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, LoopConfig};
 use kage_provider::{Provider, ProviderRegistry};
-use kage_tools::{ToolRegistry, builtin_registry};
+use kage_tools::ToolRegistry;
 
 use super::options::{Settings, choice};
 use super::{CliAcpAgent, live::Live, mcp};
@@ -437,11 +437,8 @@ fn session_spec(
         &skills,
         config.shell.program.as_deref(),
     );
-    let mut tools = builtin_registry()
-        .with_shell_config(&config.shell)
-        .with_web_search(&config.tools.web_search)
-        .with_media_tools(&config)
-        .with_renames(&config.tools.rename);
+    let mut tools =
+        kage_tools::configured_registry(&config.tools, &config.shell).with_media_tools(&config);
     let aliases = tools.alias_map();
     let editor: Vec<String> = servers.keys().cloned().collect();
     let (mcp, mcp_errors) =
@@ -504,6 +501,8 @@ mod tests {
 
     use kage_core::permissions::PermissionsConfig;
     use kage_provider::testing::MockProvider;
+
+    use kage_tools::builtin_registry;
 
     use super::super::options::Settings;
     use super::*;

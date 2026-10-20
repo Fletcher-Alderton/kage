@@ -93,6 +93,12 @@ scrub_env = []
 # url = "https://searx.example.org"
 # engine = "brave"
 # api_key_env = "BRAVE_API_KEY"
+# every [tools.<name>] table also takes `enabled` and `description`,
+# and the built-in tools take their limits. see "built-in tools" below.
+# enabled = false
+# count = 8          # results when the call sets no count
+# max_count = 20     # the most a call may ask for
+# timeout_ms = 20000
 
 [tools.generate_image]
 # the images endpoint the generate_image tool calls. Without one the
@@ -198,6 +204,74 @@ involved. Your comments, key order and every other line stay as you
 wrote them. See [permissions](/guide/permissions) for the
 rules reference, [agents](/guide/agents#limits) for the `[agents]`
 limits, and [mcp](/guide/mcp) for MCP servers and OAuth logins.
+
+## built-in tools
+
+Every tool the model can call is configured under `[tools.<name>]`,
+keyed by its real name (never a `[tools.rename]` target). Two keys work
+for any tool, built-in, plugin or MCP:
+
+- `enabled = false` removes the tool. The model never sees it, and a
+  call to it fails as an unknown tool. Sub-agents, plan mode and
+  `kage mcp serve` lose it too.
+- `description = "..."` replaces the description the model reads. Use
+  it to steer a model ("prefer `rg`"), or to shorten a description for
+  a small context window.
+
+```toml
+[tools.web_search]
+enabled = false          # an MCP server does search instead
+
+[tools.web_fetch]
+enabled = false
+
+[tools.shell]
+description = "Run one shell command. Prefer `rg` over `grep`."
+timeout_ms = 300000      # default timeout when the call sets none
+
+[tools.ask_user_question]
+enabled = false          # never stop to ask; decide and carry on
+
+[tools.github__delete_repository]
+enabled = false          # MCP tools are `<server>__<tool>`
+```
+
+The built-in tools also take their limits. The tool's description and
+input schema state the value in effect, so the model sees your limit,
+not the default.
+
+| Table | Key | Default | What it bounds |
+| --- | --- | --- | --- |
+| `[tools.read]` | `max_bytes` | 2000000 | bytes one read returns before it is cut |
+| `[tools.edit]` | `max_bytes` | 2000000 | largest file the tool will edit |
+| `[tools.grep]` | `max_matches` | 1000 | matches when the call sets no `max_matches` |
+| | `max_line_chars` | 300 | characters kept of one matching line |
+| `[tools.find]` | `max_entries` | 5000 | paths listed before the output is cut |
+| `[tools.ls]` | `max_entries` | 5000 | entries listed before the output is cut |
+| `[tools.shell]` | `timeout_ms` | 120000 | timeout when the call sets no `timeout_ms` |
+| | `max_output_bytes` | 100000 | bytes kept of each of stdout and stderr |
+| `[tools.web_fetch]` | `max_bytes` | 2000000 | body bytes when the call sets no `max_bytes` |
+| | `max_bytes_limit` | 5000000 | the most a call may ask for |
+| | `timeout_ms` | 30000 | whole-request timeout |
+| | `max_redirects` | 5 | redirects followed |
+| `[tools.web_search]` | `count` | 8 | results when the call sets no `count` |
+| | `max_count` | 20 | the most results a call may ask for |
+| | `timeout_ms` | 20000 | whole-request timeout |
+
+The shell program and the environment scrub stay in `[shell]`.
+Every value can also come from the environment, such as
+`KAGE_TOOLS__SHELL__TIMEOUT_MS=300000` or
+`KAGE_TOOLS__WEB_FETCH__ENABLED=false`.
+
+kage refuses to start on a value no tool could use: an empty
+`description`, a zero limit, a `max_bytes` above `max_bytes_limit`, or
+a `count` above `max_count`. Disabling `exit_plan` leaves plan mode
+with no way out but `/plan`, and disabling `todo_list`, `agent` or
+`swarm` takes those features away from the model, so do that on
+purpose. `kage mcp serve --tools` refuses a tool you disabled.
+
+To change what a tool does rather than what it is told, a plugin can
+replace it with `kage.override_tool` (see the plugin API).
 
 ## layering
 

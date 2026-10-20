@@ -23,10 +23,6 @@ use crate::atomic::atomic_write;
 use crate::path_lock::with_path_lock;
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
-/// Files larger than this are refused; loading one for a single edit
-/// would otherwise slurp the whole file into memory.
-const MAX_EDIT_BYTES: u64 = 2_000_000;
-
 /// Input shape for the `edit` tool. Accepts either the shorthand
 /// single-substring form or the multi-change form.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -86,8 +82,27 @@ struct LineRange {
 }
 
 /// Search-and-replace inside an existing file.
-#[derive(Debug, Default)]
-pub struct EditTool;
+#[derive(Debug)]
+pub struct EditTool {
+    /// Files larger than this are refused.
+    max_bytes: u64,
+}
+
+impl Default for EditTool {
+    fn default() -> Self {
+        Self::new(&kage_core::config::EditToolConfig::default())
+    }
+}
+
+impl EditTool {
+    /// An `edit` tool with the limit `[tools.edit]` sets.
+    #[must_use]
+    pub fn new(cfg: &kage_core::config::EditToolConfig) -> Self {
+        Self {
+            max_bytes: cfg.max_bytes,
+        }
+    }
+}
 
 impl Tool for EditTool {
     fn name(&self) -> &'static str {
@@ -120,29 +135,30 @@ impl Tool for EditTool {
         // Read, splice and rename are one sequence: without the lock, a
         // concurrent edit could rewrite the file between the read and
         // the write and lose its change set.
-        with_path_lock(&path, || EditTool::edit_locked(&input, &path))
+        with_path_lock(&path, || self.edit_locked(&input, &path))
     }
 }
 
 impl EditTool {
-    fn edit_locked(input: &EditInput, path: &Path) -> Result<ToolOutput, ToolError> {
+    fn edit_locked(&self, input: &EditInput, path: &Path) -> Result<ToolOutput, ToolError> {
+        let max_bytes = self.max_bytes;
         let file = std::fs::File::open(path).map_err(ToolError::io_at("read", path))?;
         let total_bytes = file
             .metadata()
             .map_err(ToolError::io_at("read", path))?
             .len();
-        if total_bytes > MAX_EDIT_BYTES {
+        if total_bytes > max_bytes {
             return Ok(error(
                 &input.path,
                 format!(
                     "cannot edit `{}`: the file is {total_bytes} bytes; the edit \
-                     tool refuses files over {MAX_EDIT_BYTES} bytes",
+                     tool refuses files over {max_bytes} bytes",
                     input.path
                 ),
             ));
         }
         let mut bytes = Vec::new();
-        file.take(MAX_EDIT_BYTES)
+        file.take(max_bytes)
             .read_to_end(&mut bytes)
             .map_err(ToolError::io_at("read", path))?;
         let original = String::from_utf8(bytes).map_err(|_| {
@@ -459,7 +475,7 @@ mod tests {
     fn run(workdir: &Path, input: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
-        EditTool.execute(input, &cx)
+        EditTool::default().execute(input, &cx)
     }
 
     #[test]
@@ -797,7 +813,12 @@ mod tests {
     #[test]
     fn oversized_file_is_refused_without_editing() {
         let dir = tempfile::tempdir().unwrap();
-        let big = format!("{}\n", "x".repeat(usize::try_from(MAX_EDIT_BYTES).unwrap()));
+        let big = format!(
+            "{}\n",
+            "x".repeat(
+                usize::try_from(kage_core::config::EditToolConfig::default().max_bytes).unwrap()
+            )
+        );
         fs::write(dir.path().join("big.txt"), &big).unwrap();
         let out = run(
             dir.path(),

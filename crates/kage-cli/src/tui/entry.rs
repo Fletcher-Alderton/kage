@@ -165,11 +165,8 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     );
     let system = system_prompt.as_str();
 
-    let tools = kage_tools::builtin_registry()
-        .with_shell_config(&app_config.shell)
-        .with_web_search(&app_config.tools.web_search)
-        .with_media_tools(&app_config)
-        .with_renames(&app_config.tools.rename);
+    let tools = kage_tools::configured_registry(&app_config.tools, &app_config.shell)
+        .with_media_tools(&app_config);
     let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         plugin_command_listing = support::snapshot_plugin_commands(rt);

@@ -11,10 +11,6 @@ use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
-/// Upper bound on returned paths; keeps a huge tree from flooding the
-/// model's context.
-const MAX_ENTRIES: usize = 5_000;
-
 /// Input shape for the `find` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct FindInput {
@@ -30,19 +26,43 @@ struct FindInput {
 }
 
 /// Locate files by glob pattern.
-#[derive(Debug, Default)]
-pub struct FindTool;
+#[derive(Debug)]
+pub struct FindTool {
+    /// Entries listed before the output is cut.
+    max_entries: usize,
+    description: String,
+}
+
+impl Default for FindTool {
+    fn default() -> Self {
+        Self::new(&kage_core::config::ListingToolConfig::default())
+    }
+}
+
+impl FindTool {
+    /// A `find` tool with the limit `[tools.find]` sets.
+    #[must_use]
+    pub fn new(cfg: &kage_core::config::ListingToolConfig) -> Self {
+        Self {
+            max_entries: cfg.max_entries,
+            description: format!(
+                "Find paths matching a glob pattern. Honors `.gitignore` \
+                 and `.kageignore`; skips dotfiles. `*` and `?` stay within one \
+                 path segment, `**` crosses them. Optional `type` filters by `f` \
+                 (files) or `d` (directories). Output is capped at {} entries.",
+                cfg.max_entries
+            ),
+        }
+    }
+}
 
 impl Tool for FindTool {
     fn name(&self) -> &'static str {
         "find"
     }
 
-    fn description(&self) -> &'static str {
-        "Find paths matching a glob pattern. Honors `.gitignore` \
-         and `.kageignore`; skips dotfiles. `*` and `?` stay within one \
-         path segment, `**` crosses them. Optional `type` filters by `f` \
-         (files) or `d` (directories). Output is capped at 5000 entries."
+    fn description(&self) -> &str {
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -112,14 +132,14 @@ impl Tool for FindTool {
             }
             if glob.is_match(rel) {
                 matches.push(kage_core::fsutil::slashed(rel));
-                if matches.len() > MAX_ENTRIES {
+                if matches.len() > self.max_entries {
                     truncated = true;
                     break;
                 }
             }
         }
         if truncated {
-            matches.truncate(MAX_ENTRIES);
+            matches.truncate(self.max_entries);
         }
         matches.sort();
 
@@ -128,7 +148,11 @@ impl Tool for FindTool {
         } else {
             let mut text = matches.join("\n");
             if truncated {
-                let _ = write!(text, "\n[... truncated at {MAX_ENTRIES} entries ...]");
+                let _ = write!(
+                    text,
+                    "\n[... truncated at {} entries ...]",
+                    self.max_entries
+                );
             }
             text
         };
@@ -149,6 +173,8 @@ impl Tool for FindTool {
 
 #[cfg(test)]
 mod tests {
+    /// The default `[tools.find] max_entries`.
+    const MAX_ENTRIES: usize = 5_000;
     use std::fs;
 
     use kage_core::CancelFlag;
@@ -158,7 +184,7 @@ mod tests {
     fn run(workdir: &Path, input: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
-        FindTool.execute(input, &cx)
+        FindTool::default().execute(input, &cx)
     }
 
     fn populate(dir: &Path) {

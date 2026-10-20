@@ -53,59 +53,15 @@ pub struct Config {
     /// Shell tool policy (`[shell]`).
     #[serde(default, skip_serializing_if = "ShellConfig::is_default")]
     pub shell: ShellConfig,
-    /// Tool naming overrides (`[tools.rename]`).
+    /// Built-in tool settings (`[tools]`): renames, per-tool
+    /// `enabled` / `description` overrides and limits.
     #[serde(default, skip_serializing_if = "ToolsConfig::is_default")]
     pub tools: ToolsConfig,
 }
 
-/// Tool naming overrides and the settings of the configured built-in
-/// tools.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ToolsConfig {
-    /// Advertise a tool under another name (`[tools.rename]`,
-    /// `shell = "run_command"`): the model sees only the new name,
-    /// while execution and permission rules keep working under the
-    /// real one. Renames of unknown tools are ignored.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub rename: BTreeMap<String, String>,
-    /// The engine the `web_search` tool asks (`[tools.web_search]`).
-    #[serde(default, skip_serializing_if = "WebSearchConfig::is_default")]
-    pub web_search: WebSearchConfig,
-    /// The images endpoint the `generate_image` tool calls
-    /// (`[tools.generate_image]`). Without one the tool is not
-    /// registered.
-    #[serde(default, skip_serializing_if = "MediaToolConfig::is_default")]
-    pub generate_image: MediaToolConfig,
-    /// The images endpoint the `edit_image` tool calls
-    /// (`[tools.edit_image]`). Without one the tool is not
-    /// registered.
-    #[serde(default, skip_serializing_if = "MediaToolConfig::is_default")]
-    pub edit_image: MediaToolConfig,
-    /// The speech endpoint the `generate_speech` tool calls
-    /// (`[tools.generate_speech]`). Without one the tool is not
-    /// registered.
-    #[serde(default, skip_serializing_if = "SpeechToolConfig::is_default")]
-    pub generate_speech: SpeechToolConfig,
-    /// The music endpoint the `generate_music` tool calls
-    /// (`[tools.generate_music]`). Without one the tool is not
-    /// registered.
-    #[serde(default, skip_serializing_if = "MediaToolConfig::is_default")]
-    pub generate_music: MediaToolConfig,
-}
-
-impl ToolsConfig {
-    /// Whether nothing is configured.
-    #[must_use]
-    pub fn is_default(&self) -> bool {
-        self.rename.is_empty()
-            && self.web_search.is_default()
-            && self.generate_image.is_default()
-            && self.edit_image.is_default()
-            && self.generate_speech.is_default()
-            && self.generate_music.is_default()
-    }
-}
+/// The longest a media tool call may take, matching the ceiling the
+/// media tools enforce when they build their client.
+const MAX_MEDIA_TIMEOUT_SECS: u64 = 3600;
 
 /// The endpoint a media tool calls, using an `OpenAI`-compatible API.
 ///
@@ -151,6 +107,23 @@ impl MediaToolConfig {
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
+
+    /// Reject a `timeout_secs` outside the range a call accepts.
+    ///
+    /// # Errors
+    ///
+    /// A [`crate::error::Error`] naming `[tools.{name}] timeout_secs`.
+    pub fn validate(&self, name: &str) -> Result<()> {
+        if self
+            .timeout_secs
+            .is_some_and(|secs| !(1..=MAX_MEDIA_TIMEOUT_SECS).contains(&secs))
+        {
+            return Err(config_error(format!(
+                "[tools.{name}] timeout_secs must be from 1 to {MAX_MEDIA_TIMEOUT_SECS}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The speech endpoint the `generate_speech` tool calls
@@ -178,42 +151,10 @@ impl SpeechToolConfig {
     }
 }
 
-/// The engine the `web_search` tool asks (`[tools.web_search]`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WebSearchConfig {
-    /// `duckduckgo` (the default, no key), `searxng` or `brave`.
-    pub engine: SearchEngine,
-    /// The SearXNG instance's base URL, for `engine = "searxng"`. The
-    /// instance must allow the `json` format.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// The environment variable holding the Brave Search API key, for
-    /// `engine = "brave"`. Defaults to `BRAVE_API_KEY`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
-}
-
-impl WebSearchConfig {
-    /// Whether the defaults are in effect.
-    #[must_use]
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-/// A search engine `web_search` can ask.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SearchEngine {
-    /// DuckDuckGo's HTML results page.
-    #[default]
-    Duckduckgo,
-    /// A SearXNG instance's JSON API.
-    Searxng,
-    /// The Brave Search API, with a key.
-    Brave,
-}
+pub use crate::tools_config::{
+    EditToolConfig, GrepToolConfig, ListingToolConfig, ReadToolConfig, SearchEngine,
+    ShellToolConfig, ToolToggle, ToolsConfig, WebFetchToolConfig, WebSearchConfig,
+};
 
 /// The directory `$env_var` names, with quotes and padding stripped
 /// ([`crate::fsutil::unquote_and_trim`], so a quoted or spaced value
@@ -276,7 +217,8 @@ impl Config {
     /// A [`crate::error::Error`] describing the first broken rule.
     pub fn validate(&self) -> Result<()> {
         self.permissions.validate()?;
-        self.shell.validate()
+        self.shell.validate()?;
+        self.tools.validate()
     }
 
     /// Load configuration from `path`, merging with defaults and env overrides.

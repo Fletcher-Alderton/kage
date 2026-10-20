@@ -66,7 +66,6 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use kage_loop::AgentContext;
 use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
-use kage_tools::builtin_registry;
 
 pub(crate) use paths::{
     cache_root, config_dir, data_root, models_cache_path, plugins_dir, sessions_dir, state_root,
@@ -1274,7 +1273,7 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills, shell.as_deref());
 
     let layered = kage_core::config::Config::load_layered(&workdir).unwrap_or_default();
-    let mut tools = builtin_registry().with_renames(&layered.tools.rename);
+    let mut tools = kage_tools::configured_registry(&layered.tools, &layered.shell);
     let (mcp_manager, mcp_errors) =
         mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
     for (server, err) in mcp_errors {

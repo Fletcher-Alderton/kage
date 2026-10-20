@@ -10,10 +10,6 @@ use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
-/// Upper bound on returned entries; keeps a huge tree from flooding the
-/// model's context.
-const MAX_ENTRIES: usize = 5_000;
-
 /// Input shape for the `ls` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct LsInput {
@@ -27,19 +23,43 @@ struct LsInput {
 }
 
 /// List files and directories.
-#[derive(Debug, Default)]
-pub struct LsTool;
+#[derive(Debug)]
+pub struct LsTool {
+    /// Entries listed before the output is cut.
+    max_entries: usize,
+    description: String,
+}
+
+impl Default for LsTool {
+    fn default() -> Self {
+        Self::new(&kage_core::config::ListingToolConfig::default())
+    }
+}
+
+impl LsTool {
+    /// A `ls` tool with the limit `[tools.ls]` sets.
+    #[must_use]
+    pub fn new(cfg: &kage_core::config::ListingToolConfig) -> Self {
+        Self {
+            max_entries: cfg.max_entries,
+            description: format!(
+                "List directory contents. With `recursive: true`, walks subdirectories. \
+                 Both modes honor `.gitignore` and `.kageignore` and skip dotfiles. \
+                 Entries are prefixed with `f` (file), `d` (directory), or `l` (symlink). \
+                 Output is capped at {} entries.",
+                cfg.max_entries
+            ),
+        }
+    }
+}
 
 impl Tool for LsTool {
     fn name(&self) -> &'static str {
         "ls"
     }
 
-    fn description(&self) -> &'static str {
-        "List directory contents. With `recursive: true`, walks subdirectories. \
-         Both modes honor `.gitignore` and `.kageignore` and skip dotfiles. \
-         Entries are prefixed with `f` (file), `d` (directory), or `l` (symlink). \
-         Output is capped at 5000 entries."
+    fn description(&self) -> &str {
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -80,13 +100,13 @@ impl Tool for LsTool {
             let rel = entry.path().strip_prefix(&target).unwrap_or(entry.path());
             let prefix = entry_prefix(entry.file_type());
             entries.push(format!("{prefix} {}", kage_core::fsutil::slashed(rel)));
-            if entries.len() > MAX_ENTRIES {
+            if entries.len() > self.max_entries {
                 truncated = true;
                 break;
             }
         }
         if truncated {
-            entries.truncate(MAX_ENTRIES);
+            entries.truncate(self.max_entries);
         }
         entries.sort();
 
@@ -95,7 +115,11 @@ impl Tool for LsTool {
         } else {
             let mut text = entries.join("\n");
             if truncated {
-                let _ = write!(text, "\n[... truncated at {MAX_ENTRIES} entries ...]");
+                let _ = write!(
+                    text,
+                    "\n[... truncated at {} entries ...]",
+                    self.max_entries
+                );
             }
             text
         };
@@ -124,6 +148,8 @@ fn entry_prefix(file_type: Option<std::fs::FileType>) -> char {
 
 #[cfg(test)]
 mod tests {
+    /// The default `[tools.ls] max_entries`.
+    const MAX_ENTRIES: usize = 5_000;
     use std::fs;
 
     use kage_core::CancelFlag;
@@ -133,7 +159,7 @@ mod tests {
     fn run(workdir: &Path, input: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
-        LsTool.execute(input, &cx)
+        LsTool::default().execute(input, &cx)
     }
 
     #[test]
