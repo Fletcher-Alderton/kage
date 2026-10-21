@@ -209,6 +209,9 @@ impl Provider for OpenAiProvider {
         if interleaved == Some(ReasoningField::ReasoningDetails) {
             stream = stream.keeping_reasoning_details();
         }
+        if req.produces.contains(kage_core::Modality::Image) {
+            stream = stream.fetching_linked_images(origin(&self.base_url));
+        }
         let inner: EventStream = Box::new(stream);
         Ok(crate::cancelable::make_cancelable(
             inner,
@@ -521,6 +524,9 @@ pub struct OpenAiStream {
     /// `OpenRouter` `reasoning_details` of the reasoning in flight;
     /// `None` when the stream does not keep them.
     details: Option<Vec<Value>>,
+    /// For a model that draws but answers with links: the provider's
+    /// origin, and the reply's text so far. `None` otherwise.
+    linked: Option<(String, String)>,
 }
 
 struct ToolCallBuilder {
@@ -544,7 +550,18 @@ impl OpenAiStream {
             finish_reason: StopReason::Other,
             usage: kage_core::TokenUsage::default(),
             details: None,
+            linked: None,
         }
+    }
+
+    /// Fetch the pictures the reply links on `origin`, the provider's
+    /// own scheme and host, and hand them over as image output when the
+    /// reply ends. Some image gateways answer a chat request with a
+    /// Markdown link to the picture instead of the picture itself.
+    #[must_use]
+    pub fn fetching_linked_images(mut self, origin: String) -> Self {
+        self.linked = Some((origin, String::new()));
+        self
     }
 
     /// Keep the `reasoning_details` the model streams and hand them
@@ -561,12 +578,7 @@ impl OpenAiStream {
             // A DONE-only stream invents no turn, matching on_eof; the
             // loop treats the empty stream as transient and retries.
             if self.started {
-                self.flush_details();
-                self.flush_pending_tool_calls();
-                self.pending.push_back(Ok(ProviderEvent::MessageEnd {
-                    stop_reason: self.finish_reason,
-                    usage: crate::event::without_cached_input(self.usage),
-                }));
+                self.finish();
             }
             self.done = true;
             return;
@@ -642,6 +654,9 @@ impl OpenAiStream {
             && !content.is_empty()
         {
             self.flush_details();
+            if let Some((_, text)) = self.linked.as_mut() {
+                text.push_str(content);
+            }
             self.pending.push_back(Ok(ProviderEvent::TextDelta {
                 delta: content.to_owned(),
             }));
@@ -755,6 +770,26 @@ impl OpenAiStream {
             .push_back(Ok(ProviderEvent::ThinkingSignature { data }));
     }
 
+    /// End the message: what is still buffered, the linked pictures,
+    /// then `MessageEnd`.
+    fn finish(&mut self) {
+        self.flush_details();
+        self.flush_pending_tool_calls();
+        if let Some((origin, text)) = self.linked.take() {
+            for url in image_links(&text) {
+                if url.starts_with(&format!("{origin}/"))
+                    && let Some(event) = fetch_image(&self.cancel, url)
+                {
+                    self.pending.push_back(Ok(event));
+                }
+            }
+        }
+        self.pending.push_back(Ok(ProviderEvent::MessageEnd {
+            stop_reason: self.finish_reason,
+            usage: crate::event::without_cached_input(self.usage),
+        }));
+    }
+
     fn flush_pending_tool_calls(&mut self) {
         let calls = std::mem::take(&mut self.tool_calls);
         for (index, builder) in calls {
@@ -837,12 +872,7 @@ impl crate::sse::SseStreamCore for OpenAiStream {
         // `started` guard keeps a stream that died before any output
         // from inventing a turn.
         if self.started {
-            self.flush_details();
-            self.flush_pending_tool_calls();
-            self.pending.push_back(Ok(ProviderEvent::MessageEnd {
-                stop_reason: self.finish_reason,
-                usage: crate::event::without_cached_input(self.usage),
-            }));
+            self.finish();
         }
     }
 }
@@ -883,6 +913,65 @@ fn merge_detail(details: &mut Vec<Value>, entry: &Value) {
             }
         }
     }
+}
+
+/// The scheme and host of `url`, without a path: the origin a linked
+/// picture must come from.
+fn origin(url: &str) -> String {
+    let after_scheme = url.find("://").map_or(0, |at| at + 3);
+    let end = url[after_scheme..]
+        .find('/')
+        .map_or(url.len(), |at| after_scheme + at);
+    url[..end].to_owned()
+}
+
+/// The targets of the Markdown images in `text`: `![alt](url)`.
+fn image_links(text: &str) -> Vec<&str> {
+    let mut links = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("![") {
+        rest = &rest[start + 2..];
+        let Some(close) = rest.find("](") else {
+            break;
+        };
+        rest = &rest[close + 2..];
+        let end = rest
+            .find(|c: char| c == ')' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        links.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    links
+}
+
+/// The picture at `url` as image output, or `None` when it cannot be
+/// fetched or is not an image. The link stays in the reply either way.
+fn fetch_image(cancel: &CancelFlag, url: &str) -> Option<ProviderEvent> {
+    use base64::Engine as _;
+
+    let (response, _kill) = crate::http::send_within(
+        cancel,
+        url.to_owned(),
+        std::time::Duration::from_secs(60),
+        |agent, url| agent.get(url).call(),
+    )
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(crate::images::MAX_RESPONSE_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let mime = kage_core::image::sniff_mime(&bytes)?;
+    Some(ProviderEvent::Media {
+        kind: kage_core::Modality::Image,
+        mime: mime.to_owned(),
+        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
 }
 
 fn parse_finish_reason(value: &str) -> StopReason {
@@ -1012,6 +1101,79 @@ mod tests {
             e,
             ProviderEvent::TextDelta { delta } if delta.contains("![image](https://cdn.test/a.png)")
         )));
+    }
+
+    #[test]
+    fn linked_images_come_from_the_provider_origin_only() {
+        assert_eq!(origin("https://images.test/v1"), "https://images.test");
+        assert_eq!(origin("http://127.0.0.1:8080"), "http://127.0.0.1:8080");
+        assert_eq!(
+            image_links("note\n\n![image](https://a.test/f/1.png) and ![x](b c)"),
+            ["https://a.test/f/1.png", "b"]
+        );
+        assert!(image_links("[not](an image) ![unclosed").is_empty());
+    }
+
+    /// An image gateway that answers a chat request with a link to the
+    /// picture: the picture on the provider's own origin is fetched and
+    /// handed over before the message ends, and a link elsewhere is not.
+    #[test]
+    fn a_linked_picture_on_the_provider_origin_becomes_image_output() {
+        use std::io::Write as _;
+
+        const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { return };
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = conn.read(&mut buf);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n",
+                    PNG.len()
+                );
+                let _ = conn.write_all(head.as_bytes());
+                let _ = conn.write_all(PNG);
+            }
+        });
+        let text = format!(
+            "image:low fell back\n\n![image]({origin}/f/a.png) ![other](https://elsewhere.test/b.png)"
+        );
+        let chunk = serde_json::json!({ "choices": [{ "delta": { "content": text } }] });
+        let sse: &'static [u8] =
+            format!("data: {chunk}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n")
+                .leak()
+                .as_bytes();
+
+        let events = collect_ok(stream_from_bytes(sse).fetching_linked_images(origin));
+        let media: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::Media { mime, data, .. } => Some((mime.clone(), data.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(media.len(), 1, "{events:?}");
+        assert_eq!(media[0].0, "image/png");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd { .. })
+        ));
+
+        // Without the opt-in, nothing is fetched.
+        let plain = collect_ok(stream_from_bytes(sse));
+        assert!(
+            !plain
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::Media { .. }))
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
