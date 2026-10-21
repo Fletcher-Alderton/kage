@@ -484,8 +484,7 @@ mod tests {
             for conn in listener.incoming() {
                 let Ok(mut conn) = conn else { return };
                 seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let mut buf = [0u8; 8192];
-                let _ = conn.read(&mut buf);
+                read_request(&mut conn);
                 let body = serde_json::json!({
                     "data": [{
                         "b64_json": base64::engine::general_purpose::STANDARD.encode(PNG),
@@ -502,6 +501,35 @@ mod tests {
             }
         });
         (url, hits)
+    }
+
+    /// Reads one request, headers and body. Closing a socket with
+    /// request bytes still unread resets the connection on Windows,
+    /// before the client reads the answer.
+    fn read_request(conn: &mut std::net::TcpStream) {
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        let head_end = loop {
+            if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+            match conn.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+        while seen.len() < head_end + length {
+            match conn.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+            }
+        }
     }
 
     fn tool(base_url: &str) -> GenerateImageTool {
