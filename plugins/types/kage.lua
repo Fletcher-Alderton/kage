@@ -1218,7 +1218,7 @@ kage.http = {}
 --- Since API 1.
 ---@param url string
 ---@param opts? kage.HttpRequestOpts
----@return { status: integer, body: string, content_type: string, truncated: boolean }
+---@return { status: integer, body: string, content_type: string, headers: table<string, string>, truncated: boolean }
 function kage.http.get(url, opts) end
 
 --- HTTP POST. `opts` carries headers and either `body`
@@ -1228,7 +1228,7 @@ function kage.http.get(url, opts) end
 --- Since API 1.
 ---@param url string
 ---@param opts? kage.HttpRequestOpts
----@return { status: integer, body: string, content_type: string, truncated: boolean }
+---@return { status: integer, body: string, content_type: string, headers: table<string, string>, truncated: boolean }
 function kage.http.post(url, opts) end
 
 --- HTTP DELETE. `opts` carries headers (and optionally
@@ -1237,7 +1237,7 @@ function kage.http.post(url, opts) end
 --- Since API 1.
 ---@param url string
 ---@param opts? kage.HttpRequestOpts
----@return { status: integer, body: string, content_type: string, truncated: boolean }
+---@return { status: integer, body: string, content_type: string, headers: table<string, string>, truncated: boolean }
 function kage.http.delete(url, opts) end
 
 --- Streaming HTTP POST. The response is read frame-by-frame

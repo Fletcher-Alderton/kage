@@ -22,12 +22,15 @@
 //! (default 30); `post_stream` bounds only the connection phases so
 //! the stream itself can run long.
 //!
-//! `get` / `post` / `delete` return `{ status, body, content_type, truncated }`.
+//! `get` / `post` / `delete` return `{ status, body, content_type, headers,
+//! truncated }`, `headers` keyed by lowercase name with a repeated
+//! header's values joined by `, `.
 //! `post_stream` returns `{ status, content_type }` and dispatches each
 //! decoded SSE frame to the callback as `{ event = name, data = payload }`
 //! (multi-line `data:` lines are joined with `\n`). The callback is
 //! invoked once per blank-line-terminated frame.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
 use std::time::Duration;
 
@@ -219,6 +222,7 @@ struct SimpleResult {
     status: u16,
     body: String,
     content_type: String,
+    headers: BTreeMap<String, String>,
     truncated: bool,
 }
 
@@ -227,8 +231,26 @@ fn simple_result_to_table(lua: &Lua, r: &SimpleResult) -> mlua::Result<Table> {
     table.set("status", r.status)?;
     table.set("body", r.body.clone())?;
     table.set("content_type", r.content_type.clone())?;
+    table.set("headers", lua.create_table_from(r.headers.clone())?)?;
     table.set("truncated", r.truncated)?;
     Ok(table)
+}
+
+/// `headers` by lowercase name, a repeated header's values joined by
+/// `, ` in the order they came. A value that is not UTF-8 is read
+/// lossily.
+fn header_map(headers: &ureq::http::HeaderMap) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::<String, String>::new();
+    for (name, value) in headers {
+        let value = String::from_utf8_lossy(value.as_bytes());
+        map.entry(name.as_str().to_owned())
+            .and_modify(|joined| {
+                joined.push_str(", ");
+                joined.push_str(&value);
+            })
+            .or_insert_with(|| value.into_owned());
+    }
+    map
 }
 
 /// Reads `reader` up to `max_bytes` plus one lookahead byte, reporting
@@ -262,11 +284,13 @@ fn simple_request(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_owned();
+    let headers = header_map(response.headers());
     let (buf, truncated) = read_capped(response.into_body().into_reader(), max_bytes);
     Ok(SimpleResult {
         status,
         body: String::from_utf8_lossy(&buf).into_owned(),
         content_type,
+        headers,
         truncated,
     })
 }
@@ -608,6 +632,7 @@ mod tests {
     use kage_tools::ssrf;
     use mlua::{Lua, Table};
 
+    use super::header_map;
     use crate::PluginRuntime;
 
     /// A runtime that grants `net` to plugin `p`. `kage.http` is gated,
@@ -784,6 +809,20 @@ mod tests {
         let opts: Table = lua.load("{ max_bytes = 10 }").eval().unwrap();
         let spec = super::build_request(Some(&opts)).unwrap();
         assert_eq!(spec.max_bytes, Some(10));
+    }
+
+    #[test]
+    fn headers_come_by_lowercase_name_with_repeats_joined() {
+        use ureq::http::{HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", HeaderValue::from_static("30"));
+        headers.append("x-web-tier", HeaderValue::from_static("a"));
+        headers.append("x-web-tier", HeaderValue::from_static("b"));
+        headers.insert("x-raw", HeaderValue::from_bytes(b"caf\xe9").unwrap());
+        let map = header_map(&headers);
+        assert_eq!(map["retry-after"], "30");
+        assert_eq!(map["x-web-tier"], "a, b");
+        assert_eq!(map["x-raw"], "caf\u{fffd}");
     }
 
     #[test]

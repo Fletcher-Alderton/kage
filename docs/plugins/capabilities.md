@@ -170,7 +170,7 @@ tokens are secrets of the same class as environment secrets.
 
 ```lua
 local res = kage.http.get("https://example.com/status")
--- res = { status = 200, body = "...", content_type = "...", truncated = false }
+-- res = { status = 200, body = "...", content_type = "...", headers = { ... }, truncated = false }
 ```
 
 Attaches the request helpers to `kage.http`. Without the grant,
@@ -185,8 +185,11 @@ Attaches the request helpers to `kage.http`. Without the grant,
 
 `opts` may carry `headers`, `body`, `json` (a table sent as JSON,
 instead of `body`), `max_bytes` and `timeout_secs`. `get`, `post` and
-`delete` return `{ status, body, content_type, truncated }` and give up
-after `timeout_secs` seconds (30 by default). The body is capped at
+`delete` return `{ status, body, content_type, headers, truncated }`
+and give up after `timeout_secs` seconds (30 by default). `headers`
+maps each lowercase header name to its value, with the values of a
+repeated header joined by `, `. A `set-cookie` value can hold commas of
+its own, so it cannot be split back apart. The body is capped at
 `max_bytes` (2 MB by default, 32 MB for `post_stream`), and `truncated`
 is `true` when the cap was hit. `post_stream` bounds only connecting
 and sending, so a long stream is never cut off.
