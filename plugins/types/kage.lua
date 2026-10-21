@@ -172,6 +172,7 @@
 ---@field description string One-line description for the model.
 ---@field schema table JSON schema for the input object.
 ---@field risk? kage.ToolRisk Permission tier; defaults to read.
+---@field parallel? boolean Let a batch of calls to this tool run at once; defaults to false.
 ---@field execute fun(input: table): string|kage.ToolResult|boolean|number|nil Tool body.
 
 --- One declared command argument.

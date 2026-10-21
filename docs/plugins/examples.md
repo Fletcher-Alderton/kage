@@ -208,9 +208,10 @@ kage.override_tool({
 })
 ```
 
-`kage.exec` blocks until the command exits and kills it after 30
-seconds, so this override has neither the live output nor the
-cancellation of the built-in tool. The snippet is Unix-only: on
+`kage.exec` waits until the command exits and kills it after 30
+seconds, so this override has no live output. Cancelling the call stops
+the wait, but unlike the built-in tool it leaves the command running
+until it ends. The snippet is Unix-only: on
 Windows the shell tool uses PowerShell.
 
 ## conversation and file rewind

@@ -5,10 +5,11 @@
 //! sees it. It spawns a subprocess directly - no shell, so there is
 //! no quoting or injection surface - with its working directory
 //! pinned under the host workdir via [`kage_tools::resolve_under`]
-//! (the same escape check `kage.fs` uses). The call blocks until the
+//! (the same escape check `kage.fs` uses). The call waits until the
 //! process exits or `timeout_secs` elapses (default 30) and returns
 //! its captured output plus `timed_out` and `truncated` flags, the way
-//! `kage.http.get` blocks; a rewind plugin uses it to snapshot files
+//! `kage.http.get` does: inside a driven coroutine the wait yields, and
+//! anywhere else it blocks. A rewind plugin uses it to snapshot files
 //! with `git` between turns. Each stream keeps at most 1 MB; output
 //! past that is dropped and the `truncated` flag is set.
 //!
@@ -21,7 +22,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,7 @@ use kage_tools::resolve_under;
 use mlua::{Lua, Table};
 
 use crate::capabilities::{Capability, CapabilityRegistry};
+use crate::tasks;
 
 /// How long a spawned process may run when the spec sets no
 /// `timeout_secs`.
@@ -75,94 +77,119 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
             let root = workdir.clone();
             pkage.set(
                 "exec",
-                lua.create_function(move |lua, spec: Table| {
-                    let cmd: Option<String> = spec.get("cmd")?;
-                    let cmd = cmd.filter(|c| !c.is_empty()).ok_or_else(|| {
-                        mlua::Error::external("kage.exec: `cmd` must be a non-empty string")
-                    })?;
-                    let args: Vec<String> =
-                        spec.get::<Option<Vec<String>>>("args")?.unwrap_or_default();
-                    let cwd: Option<String> = spec.get("cwd")?;
-                    let dir = match cwd {
-                        Some(rel) => resolve_under(&root, Path::new(&rel)).map_err(|e| {
-                            mlua::Error::external(format!("kage.exec: cwd {rel}: {e}"))
-                        })?,
-                        None => root.clone(),
-                    };
-                    let timeout_secs: Option<u64> = spec.get("timeout_secs")?;
-                    if timeout_secs == Some(0) {
-                        return Err(mlua::Error::external(
-                            "kage.exec: `timeout_secs` must be at least 1",
-                        ));
-                    }
-                    if timeout_secs.is_some_and(|s| s > MAX_EXEC_TIMEOUT_SECS) {
-                        return Err(mlua::Error::external(format!(
-                            "kage.exec: `timeout_secs` must be at most {MAX_EXEC_TIMEOUT_SECS}"
-                        )));
-                    }
-                    let timeout = timeout_secs.map_or(DEFAULT_EXEC_TIMEOUT, |s| {
-                        Duration::from_secs(s).max(Duration::from_secs(1))
-                    });
-
-                    let mut child = Command::new(&cmd)
-                        .args(&args)
-                        .current_dir(&dir)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .spawn()
-                        .map_err(|e| {
-                            mlua::Error::external(format!("kage.exec: spawn {cmd}: {e}"))
+                lua.create_async_function(move |lua, spec: Table| {
+                    let root = root.clone();
+                    async move {
+                        let cmd: Option<String> = spec.get("cmd")?;
+                        let cmd = cmd.filter(|c| !c.is_empty()).ok_or_else(|| {
+                            mlua::Error::external("kage.exec: `cmd` must be a non-empty string")
                         })?;
-                    // Drain each pipe on its own thread so a child that
-                    // outgrows the OS pipe buffer never stalls on a
-                    // full pipe while we are waiting for it to exit.
-                    let stdout_pipe = child.stdout.take();
-                    let stderr_pipe = child.stderr.take();
-                    let stdout_thread = stdout_pipe.map(|pipe| thread::spawn(move || drain(pipe)));
-                    let stderr_thread = stderr_pipe.map(|pipe| thread::spawn(move || drain(pipe)));
-
-                    let deadline = Instant::now() + timeout;
-                    let mut timed_out = false;
-                    let status = loop {
-                        match reaper::try_wait(&mut child) {
-                            Ok(Some(status)) => break status,
-                            Ok(None) => {
-                                if Instant::now() >= deadline {
-                                    let _ = child.kill();
-                                    let status = reaper::wait(&mut child).map_err(|e| {
-                                        mlua::Error::external(format!("kage.exec: wait {cmd}: {e}"))
-                                    })?;
-                                    timed_out = true;
-                                    break status;
-                                }
-                                thread::sleep(POLL_INTERVAL);
-                            }
-                            Err(e) => {
-                                return Err(mlua::Error::external(format!(
-                                    "kage.exec: wait {cmd}: {e}"
-                                )));
-                            }
+                        let args: Vec<String> =
+                            spec.get::<Option<Vec<String>>>("args")?.unwrap_or_default();
+                        let cwd: Option<String> = spec.get("cwd")?;
+                        let dir = match cwd {
+                            Some(rel) => resolve_under(&root, Path::new(&rel)).map_err(|e| {
+                                mlua::Error::external(format!("kage.exec: cwd {rel}: {e}"))
+                            })?,
+                            None => root.clone(),
+                        };
+                        let timeout_secs: Option<u64> = spec.get("timeout_secs")?;
+                        if timeout_secs == Some(0) {
+                            return Err(mlua::Error::external(
+                                "kage.exec: `timeout_secs` must be at least 1",
+                            ));
                         }
-                    };
+                        if timeout_secs.is_some_and(|s| s > MAX_EXEC_TIMEOUT_SECS) {
+                            return Err(mlua::Error::external(format!(
+                                "kage.exec: `timeout_secs` must be at most {MAX_EXEC_TIMEOUT_SECS}"
+                            )));
+                        }
+                        let timeout = timeout_secs.map_or(DEFAULT_EXEC_TIMEOUT, |s| {
+                            Duration::from_secs(s).max(Duration::from_secs(1))
+                        });
 
-                    let (stdout, stdout_truncated) = stdout_thread
-                        .map(|h| h.join().unwrap_or_default())
-                        .unwrap_or_default();
-                    let (stderr, stderr_truncated) = stderr_thread
-                        .map(|h| h.join().unwrap_or_default())
-                        .unwrap_or_default();
-                    let out = lua.create_table()?;
-                    out.set("code", status.code().unwrap_or(-1))?;
-                    out.set("timed_out", timed_out)?;
-                    out.set("truncated", stdout_truncated || stderr_truncated)?;
-                    out.set("stdout", lua.create_string(&stdout)?)?;
-                    out.set("stderr", lua.create_string(&stderr)?)?;
-                    Ok(out)
+                        let child = Command::new(&cmd)
+                            .args(&args)
+                            .current_dir(&dir)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .spawn()
+                            .map_err(|e| {
+                                mlua::Error::external(format!("kage.exec: spawn {cmd}: {e}"))
+                            })?;
+                        let finished = if tasks::is_driven(&lua) {
+                            tasks::off_thread(move || wait_for(child, timeout))
+                                .await
+                                .unwrap_or_else(|| Err("the waiting thread panicked".into()))
+                        } else {
+                            wait_for(child, timeout)
+                        }
+                        .map_err(|e| {
+                            mlua::Error::external(format!("kage.exec: wait {cmd}: {e}"))
+                        })?;
+                        let out = lua.create_table()?;
+                        out.set("code", finished.code)?;
+                        out.set("timed_out", finished.timed_out)?;
+                        out.set("truncated", finished.truncated)?;
+                        out.set("stdout", lua.create_string(&finished.stdout)?)?;
+                        out.set("stderr", lua.create_string(&finished.stderr)?)?;
+                        Ok(out)
+                    }
                 })?,
             )?;
             Ok(())
         }));
+}
+
+/// How a process [`wait_for`] waited on ended.
+struct Finished {
+    code: i32,
+    timed_out: bool,
+    truncated: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Wait for `child` to exit, killing it once `timeout` passes, and
+/// collect its output.
+fn wait_for(mut child: Child, timeout: Duration) -> Result<Finished, String> {
+    // Drain each pipe on its own thread so a child that outgrows the OS
+    // pipe buffer never stalls on a full pipe while we wait for it.
+    let stdout_thread = child
+        .stdout
+        .take()
+        .map(|pipe| thread::spawn(move || drain(pipe)));
+    let stderr_thread = child
+        .stderr
+        .take()
+        .map(|pipe| thread::spawn(move || drain(pipe)));
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match reaper::try_wait(&mut child).map_err(|e| e.to_string())? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                timed_out = true;
+                break reaper::wait(&mut child).map_err(|e| e.to_string())?;
+            }
+            None => thread::sleep(POLL_INTERVAL),
+        }
+    };
+    let (stdout, stdout_truncated) = stdout_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_thread
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    Ok(Finished {
+        code: status.code().unwrap_or(-1),
+        timed_out,
+        truncated: stdout_truncated || stderr_truncated,
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(test)]
@@ -208,6 +235,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_tool_waiting_on_a_process_leaves_other_calls_free() {
+        use std::time::{Duration, Instant};
+
+        use kage_core::CancelFlag;
+        use kage_tools::ToolContext;
+
+        let rt = rt_with_exec();
+        rt.eval_plugin(
+            "p",
+            "kage.request_capabilities({'exec'}); \
+             kage.register_tool({ name = 'slow', description = '', \
+                 execute = function() kage.exec({ cmd = 'sleep', args = { '0.6' } }) return 'slow' end }); \
+             kage.register_tool({ name = 'quick', description = '', \
+                 execute = function() return 'quick' end })",
+        )
+        .unwrap();
+        let tool = |name: &str| {
+            rt.registered_tools()
+                .into_iter()
+                .find(|tool| tool.name() == name)
+                .unwrap()
+        };
+        let run = |tool: &dyn kage_tools::Tool| {
+            let cancel = CancelFlag::new();
+            let workdir = std::path::PathBuf::from(".");
+            tool.execute(serde_json::json!({}), &ToolContext::new(&workdir, &cancel))
+                .unwrap()
+                .text
+        };
+        let slow = tool("slow");
+        let waiting = std::thread::spawn(move || run(slow.as_ref()));
+        std::thread::sleep(Duration::from_millis(50));
+        let start = Instant::now();
+        assert_eq!(run(tool("quick").as_ref()), "quick");
+        assert!(
+            start.elapsed() < Duration::from_millis(300),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(waiting.join().unwrap(), "slow");
     }
 
     #[test]

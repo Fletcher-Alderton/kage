@@ -70,6 +70,11 @@ pub(super) const CLASSES: &[Class] = &[
                 doc: "Permission tier; defaults to read.",
             },
             Field {
+                name: "parallel?",
+                ty: "boolean",
+                doc: "Let a batch of calls to this tool run at once; defaults to false.",
+            },
+            Field {
                 name: "execute",
                 ty: "fun(input: table): string|kage.ToolResult|boolean|number|nil",
                 doc: "Tool body.",

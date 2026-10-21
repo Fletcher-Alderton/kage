@@ -75,8 +75,10 @@ Spawns a subprocess **directly, with no shell**, so there is no quoting
 or injection surface. `cmd` resolves through `PATH`. The working
 directory defaults to the host workdir, and `cwd` may name a directory
 under it but never escape it (the same check `kage.fs` uses). The call
-blocks until the process exits and returns its captured output, the
-way `kage.http.get` blocks. A process still running after
+waits until the process exits and returns its captured output. Inside
+a tool's `execute` or a provider's `stream` handler the wait lets other
+plugin work run, the way `kage.http.get` does; anywhere else it holds
+the Lua thread. A process still running after
 `timeout_secs` seconds (30 by default, at least 1) is killed and the
 result has `timed_out = true`. `truncated` is `true` when stdout or
 stderr passed the 1 MiB cap per stream and the rest of that stream

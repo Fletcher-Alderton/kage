@@ -116,6 +116,63 @@ fn slow_terminal_hook_lets_the_key_through_and_warns_once() {
 }
 
 #[test]
+fn a_waiting_tool_leaves_the_owner_free_for_other_calls() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval(
+        r"
+        kage.register_tool({ name = 'slow', description = '', schema = {},
+            execute = function() kage.sleep_ms(400) kage.sleep_ms(400) return 'slow' end })
+        kage.register_tool({ name = 'quick', description = '', schema = {},
+            execute = function() return 'quick' end })
+        ",
+    )
+    .unwrap();
+    let slow = tool_named(&rt, "slow");
+    let waiting = thread::spawn(move || run_tool(&slow, &CancelFlag::new()));
+    thread::sleep(Duration::from_millis(50));
+    let start = std::time::Instant::now();
+    assert_eq!(
+        run_tool(&tool_named(&rt, "quick"), &CancelFlag::new()).unwrap(),
+        "quick"
+    );
+    assert!(
+        start.elapsed() < Duration::from_millis(400),
+        "the quick call waited {:?} behind the sleeping one",
+        start.elapsed()
+    );
+    assert_eq!(waiting.join().unwrap().unwrap(), "slow");
+}
+
+#[test]
+fn a_cancelled_tool_stops_where_it_waits() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval(
+        r"
+        ticks = 0
+        kage.register_tool({ name = 'spin', description = '', schema = {},
+            execute = function()
+                while true do ticks = ticks + 1 kage.sleep_ms(10) end
+            end })
+        ",
+    )
+    .unwrap();
+    let cancel = CancelFlag::new();
+    let flag = cancel.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        flag.cancel();
+    });
+    let result = run_tool(&tool_named(&rt, "spin"), &cancel);
+    assert!(matches!(result, Err(ToolError::Cancelled)), "{result:?}");
+    let ticks = || rt.eval("return ticks").unwrap().as_i64().unwrap();
+    thread::sleep(Duration::from_millis(30));
+    let after_cancel = ticks();
+    assert!(after_cancel > 0);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(ticks(), after_cancel, "the handler kept running");
+}
+
+#[test]
 fn lua_tool_honors_cancel_while_waiting_for_a_busy_owner() {
     let rt = PluginRuntime::new().unwrap();
     rt.eval(

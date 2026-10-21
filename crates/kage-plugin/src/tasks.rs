@@ -1,19 +1,20 @@
 //! Coroutines the Lua owner thread drives between its jobs.
 //!
 //! A job that would hold the owner thread for long, a provider stream
-//! above all, runs its Lua function as a coroutine instead: [`drive`]
+//! or a tool call, runs its Lua function as a coroutine instead: [`drive`]
 //! starts it and [`spawn`] hands the resulting future to the owner
 //! loop (see [`crate::host`]), which polls it whenever it is woken and
 //! runs other jobs in between. Host functions called inside such a
 //! coroutine ([`is_driven`]) move their blocking work to a worker
 //! thread ([`off_thread`]) and await it, so the coroutine yields
 //! instead of holding the thread. Called anywhere else they block as
-//! they always did, which keeps tools, commands and hooks unchanged.
+//! they always did, which keeps commands and hooks unchanged.
 
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::future::{Future, poll_fn};
-use std::pin::Pin;
+use std::pin::{Pin, pin};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::thread;
@@ -99,6 +100,43 @@ impl Drop for Driven {
             registry.driven.borrow_mut().remove(&self.key);
         }
     }
+}
+
+/// A switch another thread flips to stop a task at its next poll.
+#[derive(Default)]
+pub(crate) struct Abort {
+    aborted: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl Abort {
+    /// Stop the task: it is woken and drops what it was awaiting.
+    pub(crate) fn abort(&self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        if let Some(waker) = lock(&self.waker).take() {
+            waker.wake();
+        }
+    }
+}
+
+/// What `future` resolves to, or `None` once `abort` is flipped. The
+/// future is dropped then, so a driven coroutine ends at the point it
+/// was waiting.
+pub(crate) async fn abortable<F: Future>(future: F, abort: Arc<Abort>) -> Option<F::Output> {
+    let mut future = pin!(future);
+    poll_fn(|cx| {
+        if abort.aborted.load(Ordering::SeqCst) {
+            return Poll::Ready(None);
+        }
+        *lock(&abort.waker) = Some(cx.waker().clone());
+        // Flipped between the check and storing the waker: the waker
+        // stored is never woken, so look again.
+        if abort.aborted.load(Ordering::SeqCst) {
+            return Poll::Ready(None);
+        }
+        future.as_mut().poll(cx).map(Some)
+    })
+    .await
 }
 
 /// Run `work` on a thread of its own and await its result. `None` when

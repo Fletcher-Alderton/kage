@@ -11,20 +11,23 @@
 //! })
 //! ```
 //! and the runtime stores a [`LuaTool`] that the host can hand to a
-//! `ToolRegistry`. Tool execution runs on the runtime's Lua owner
-//! thread; the calling thread waits for the result and gives up as
-//! soon as the tool's cancel flag is set.
+//! `ToolRegistry`. A call runs its handler as a driven coroutine on the
+//! runtime's Lua owner thread (see [`crate::tasks`]), so while it waits
+//! on `kage.http` or `kage.sleep_ms` other calls and plugins run. The
+//! calling thread waits for the result; once the call is cancelled it
+//! gives up, and the handler is dropped where it was waiting.
 
 use std::sync::{Arc, Mutex};
 
+use crossbeam_channel::select_biased;
 use kage_core::{Risk, ToolOutput, sync::lock};
-use kage_tools::{Tool, ToolContext, ToolError};
+use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
-use crate::watchdog;
+use crate::tasks::{self, Abort};
 
 /// Shared collection of tools registered by plugins. Cloned into the Lua
 /// callback so registrations made during `dofile` accumulate here.
@@ -52,6 +55,7 @@ pub struct LuaTool {
     description: String,
     schema: serde_json::Value,
     risk: Risk,
+    parallel: bool,
     host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
@@ -83,6 +87,10 @@ impl Tool for LuaTool {
         self.risk
     }
 
+    fn execution_mode(&self) -> Option<ExecMode> {
+        self.parallel.then_some(ExecMode::Parallel)
+    }
+
     fn execute(
         &self,
         input: serde_json::Value,
@@ -91,50 +99,85 @@ impl Tool for LuaTool {
         if cx.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
-        let name = self.name.clone();
-        let sink = Arc::clone(&self.sink);
-        let key = Arc::clone(&self.handler_key);
-        let reply = self.host.call_cancellable(cx.cancel_flag(), move |lua| {
-            run_tool(lua, &name, &sink, &key, &input)
-        });
-        match reply {
-            Ok(Some(result)) => result,
-            Ok(None) => Err(ToolError::Cancelled),
-            Err(e) => Err(ToolError::Other(format!(
-                "plugin tool '{}': {e}",
-                self.name
-            ))),
+        let failed = |e: &dyn std::fmt::Display| {
+            ToolError::Other(format!("plugin tool '{}': {e}", self.name))
+        };
+        let abort = Arc::new(Abort::default());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let call = Call {
+            name: self.name.clone(),
+            sink: Arc::clone(&self.sink),
+            key: Arc::clone(&self.handler_key),
+            abort: Arc::clone(&abort),
+            tx,
+        };
+        match self
+            .host
+            .call_cancellable(cx.cancel_flag(), move |lua| call.start(lua, &input))
+        {
+            Ok(Some(Ok(()))) => {}
+            Ok(Some(Err(e))) => return Err(e),
+            Ok(None) => return Err(ToolError::Cancelled),
+            Err(e) => return Err(failed(&e)),
+        }
+        let watch = cx.cancel_flag().watch();
+        select_biased! {
+            recv(rx) -> output => output.map_err(|_| failed(&"the plugin runtime stopped")),
+            recv(watch.receiver()) -> _ => {
+                abort.abort();
+                Err(ToolError::Cancelled)
+            }
         }
     }
 }
 
-fn run_tool(
-    lua: &Lua,
-    name: &str,
-    sink: &SharedHostLog,
-    handler_key: &RegistryKey,
-    input: &serde_json::Value,
-) -> Result<ToolOutput, ToolError> {
-    let func: Function = lua
-        .registry_value(handler_key)
-        .map_err(|e| ToolError::Other(format!("plugin tool '{name}': {e}")))?;
-    let lua_input = json_to_lua(lua, input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-    match watchdog::run(lua, watchdog::BUDGET, || func.call::<Value>(lua_input)) {
-        Ok(returned) => Ok(value_to_output(returned)),
-        Err(err) => {
-            let mut s = lock(sink);
-            s.log(
-                LogLevel::Error,
-                &format!("plugin tool '{name}' raised: {err}"),
-            );
-            Ok(ToolOutput {
-                is_error: true,
-                text: err.to_string(),
-                structured: None,
-                terminate: false,
-                media: Vec::new(),
-            })
-        }
+/// One call of a plugin tool, on its way to the owner thread.
+struct Call {
+    name: String,
+    sink: SharedHostLog,
+    key: Arc<RegistryKey>,
+    abort: Arc<Abort>,
+    tx: crossbeam_channel::Sender<ToolOutput>,
+}
+
+impl Call {
+    /// Start the handler on `input` as a driven coroutine, whose output
+    /// goes to `tx` unless the call is aborted first.
+    fn start(self, lua: &Lua, input: &serde_json::Value) -> Result<(), ToolError> {
+        let Self {
+            name,
+            sink,
+            key,
+            abort,
+            tx,
+        } = self;
+        let failed = |e: mlua::Error| ToolError::Other(format!("plugin tool '{name}': {e}"));
+        let func: Function = lua.registry_value(&key).map_err(failed)?;
+        let input = json_to_lua(lua, input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        let run = tasks::drive::<Value>(lua, func, input).map_err(failed)?;
+        tasks::spawn(lua, async move {
+            let Some(returned) = tasks::abortable(run, abort).await else {
+                return;
+            };
+            let output = match returned {
+                Ok(value) => value_to_output(value),
+                Err(err) => {
+                    lock(&sink).log(
+                        LogLevel::Error,
+                        &format!("plugin tool '{name}' raised: {err}"),
+                    );
+                    ToolOutput {
+                        is_error: true,
+                        text: err.to_string(),
+                        structured: None,
+                        terminate: false,
+                        media: Vec::new(),
+                    }
+                }
+            };
+            let _ = tx.send(output);
+        });
+        Ok(())
     }
 }
 
@@ -273,6 +316,7 @@ fn install_tool_fn(
             let description: String = spec.get("description")?;
             let risk_str: Option<String> = spec.get("risk")?;
             let risk = parse_risk(risk_str.as_deref())?;
+            let parallel: Option<bool> = spec.get("parallel")?;
             let schema_value: Value = spec.get("schema").unwrap_or(Value::Nil);
             let schema = lua_to_json(schema_value).unwrap_or(serde_json::Value::Null);
             let execute: Function = spec.get("execute")?;
@@ -282,6 +326,7 @@ fn install_tool_fn(
                 description,
                 schema,
                 risk,
+                parallel: parallel.unwrap_or(false),
                 host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(key),
@@ -367,6 +412,28 @@ mod tests {
         let tool = &tools[0];
         assert_eq!(tool.name(), "echo");
         assert_eq!(tool.risk(), Risk::Read);
+    }
+
+    #[test]
+    fn a_tool_runs_in_parallel_only_when_it_says_so() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_tool({ name = 'one', description = '', execute = function() end })
+            kage.register_tool({ name = 'many', description = '', parallel = true,
+                execute = function() end })
+            ",
+        )
+        .unwrap();
+        let mode = |name: &str| {
+            rt.registered_tools()
+                .into_iter()
+                .find(|tool| tool.name() == name)
+                .unwrap()
+                .execution_mode()
+        };
+        assert_eq!(mode("one"), None);
+        assert_eq!(mode("many"), Some(ExecMode::Parallel));
     }
 
     #[test]

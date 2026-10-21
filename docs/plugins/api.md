@@ -91,8 +91,9 @@ it. Lines logged while kage starts show as `kage:log` blocks instead.
 ### `kage.sleep_ms(ms: integer)`
 
 Sleep for `ms` milliseconds, at most 500 per call. Loop the call to
-wait longer. Inside a provider's `stream` handler the wait lets other
-plugin work run meanwhile; anywhere else it holds the Lua thread.
+wait longer. Inside a tool's `execute` or a provider's `stream` handler
+the wait lets other plugin work run meanwhile; anywhere else it holds
+the Lua thread.
 
 ### `kage.json.encode(value)` / `kage.json.decode(raw: string)`
 
@@ -335,12 +336,27 @@ built-in `read` or `shell`. Spec fields:
   description = "echo back the input",        -- string, required
   schema      = { type = "object" },          -- json schema, required
   risk        = "read",                       -- "read" | "write" | "exec" | "network"
+  parallel    = false,                        -- let a batch of calls run at once
   execute     = function(input) ... end,      -- (table) -> string or table
 }
 ```
 
 `risk` defaults to `"read"` when omitted. Any other value raises an
 error and the tool is not registered.
+
+Every plugin shares one Lua thread, and `execute` runs on it as a
+coroutine. While it waits in `kage.http.*`, `kage.exec` or
+`kage.sleep_ms` it yields, so other tool calls, commands, events and
+renders run in between, and calls can overlap. Code that busy-loops
+without calling any of these still holds the thread until it returns.
+Cancelling a call ends `execute` where it is waiting: it never resumes,
+and a request already on the wire, or a process already started, runs
+to its end unread. Since calls can overlap, state a handler
+keeps between waits may change under it.
+
+With `parallel = true`, a batch made only of calls to such tools runs
+at once, as the built-in `web_search` does. Leave it off for a tool
+whose calls must not overlap.
 
 `execute` may return a string (the tool output text) or a table:
 
