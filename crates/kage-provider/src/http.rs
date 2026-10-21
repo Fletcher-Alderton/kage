@@ -37,11 +37,15 @@ use crate::interrupt::{InterruptibleConnector, KillRegistry};
 /// Providers emit deltas or pings well inside that; the loop's
 /// auto-retry backstops a genuine stall, so the grace is generous on
 /// purpose to avoid killing a slow-but-alive generation. `global`
-/// stays unset so an active generation is never capped by total time.
+/// stays unset for a stream, so an active generation is never capped
+/// by total time. A buffered call passes `total` instead (see
+/// [`send_within`]), which caps every phase from the first resolve to
+/// the last byte of the body.
 ///
 /// Every request names kage and its version as the `User-Agent`.
-fn build_config() -> ureq::config::Config {
+fn build_config(total: Option<Duration>) -> ureq::config::Config {
     ureq::Agent::config_builder()
+        .timeout_global(total)
         .http_status_as_error(false)
         .user_agent(concat!("kage/", env!("CARGO_PKG_VERSION")))
         .timeout_resolve(Some(Duration::from_secs(15)))
@@ -61,9 +65,9 @@ fn build_config() -> ureq::config::Config {
 /// shutdown. Dialing fresh per request costs a TLS handshake per call
 /// and buys a guarantee in return: every connection kage opens can be
 /// torn down on cancel.
-fn build_agent(kill: &Arc<KillRegistry>) -> ureq::Agent {
+fn build_agent(kill: &Arc<KillRegistry>, total: Option<Duration>) -> ureq::Agent {
     ureq::Agent::with_parts(
-        build_config(),
+        build_config(total),
         InterruptibleConnector::new(Arc::clone(kill)),
         ureq::unversioned::resolver::DefaultResolver::default(),
     )
@@ -91,8 +95,39 @@ where
         + Send
         + 'static,
 {
+    send_capped(cancel, url, None, build)
+}
+
+/// [`send`] for a buffered call, whose whole duration is capped at
+/// `total`: resolving, connecting, the wait for the response, and
+/// reading its body. A call past it fails as a transport error.
+pub(crate) fn send_within<F>(
+    cancel: &CancelFlag,
+    url: String,
+    total: Duration,
+    build: F,
+) -> Result<(ureq::http::Response<ureq::Body>, Arc<KillRegistry>), ProviderError>
+where
+    F: FnOnce(&ureq::Agent, &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>
+        + Send
+        + 'static,
+{
+    send_capped(cancel, url, Some(total), build)
+}
+
+fn send_capped<F>(
+    cancel: &CancelFlag,
+    url: String,
+    total: Option<Duration>,
+    build: F,
+) -> Result<(ureq::http::Response<ureq::Body>, Arc<KillRegistry>), ProviderError>
+where
+    F: FnOnce(&ureq::Agent, &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>
+        + Send
+        + 'static,
+{
     let kill = Arc::new(KillRegistry::new());
-    let agent = build_agent(&kill);
+    let agent = build_agent(&kill, total);
     let response = crate::cancelable::cancellable_call(cancel, &kill, move || {
         build(&agent, &url).map_err(|err| map_ureq_error(err, &url))
     })?;
@@ -184,7 +219,10 @@ fn auth_detail(status: u16, body: &str) -> String {
 /// HTTP-date (IMF-fixdate). A date in the past, or anything
 /// unparseable, yields `None` so the caller falls back to its own
 /// backoff.
-fn parse_retry_after(value: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+pub(crate) fn parse_retry_after(
+    value: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Duration> {
     let value = value?.trim();
     if value.is_empty() {
         return None;

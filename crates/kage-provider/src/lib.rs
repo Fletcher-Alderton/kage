@@ -15,6 +15,7 @@ pub mod event;
 pub mod gemini;
 pub mod headers;
 pub mod http;
+pub mod images;
 pub mod interrupt;
 pub mod metadata;
 pub mod openai;

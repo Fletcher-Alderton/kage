@@ -94,6 +94,12 @@ scrub_env = []
 # engine = "brave"
 # api_key_env = "BRAVE_API_KEY"
 
+[tools.generate_image]
+# the images endpoint the generate_image tool calls. Without one the
+# tool is not offered. See "image generation" below.
+# provider = "openai"
+# model = "gpt-image-1"
+
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
 # leader = "<C-x>"
@@ -205,8 +211,9 @@ parts of it only apply once you trust the project:
 
 All of them share one trust decision. Every other project key, such
 as `[ui]`, `[loop]` or `[agents]`, applies without trust. Provider
-settings, `[acp.agents]`, `provider.default_model` and `plugins.dir`
-are only read from your user config.
+settings, `[acp.agents]`, `[tools.generate_image]`,
+`provider.default_model` and `plugins.dir` are only read from your
+user config.
 
 When the TUI starts in a project that sets any of these, it lists what
 the project asks for (server commands and URLs, sampling, capability
@@ -230,6 +237,66 @@ untrusted project file.
 
 Trusted projects are recorded in `~/.local/state/kage/trust.json`,
 keyed by the project directory.
+
+## image generation
+
+The `generate_image` tool lets any model make an image from a prompt,
+through an endpoint that speaks the OpenAI Images API
+(`POST {base_url}/images/generations`). A model that draws on its own
+needs no tool (see [providers](/guide/providers)); this is for the
+others. kage offers it only when `[tools.generate_image]` names an
+endpoint and a model:
+
+```toml
+# Reuse a provider kage already reaches, with its base URL, key and
+# headers.
+[tools.generate_image]
+provider = "openai"
+model = "gpt-image-1"
+```
+
+Or name the endpoint itself. `base_url` wins when both are set.
+
+```toml
+[tools.generate_image]
+base_url = "https://images.example.com/v1"
+api_key_env = "IMAGES_API_KEY"   # or a key saved for the tool, below
+headers = { X-Team = "art" }
+model = "image-small"
+timeout_secs = 180               # the whole request, 1 to 3600
+```
+
+To keep the key out of the environment, save it for the tool with
+`kage auth login generate_image` and leave out `api_key_env`. A
+variable named in `api_key_env` comes first when it is set, and the
+saved key fills in when it is not. With neither, no key is sent.
+
+`provider` names `openai`, an OpenAI-compatible provider, or a
+`[providers.custom.<id>]` of kind `openai`. kage's `anthropic` and
+`google` providers speak other APIs and cannot be named; a server's
+OpenAI-compatible images endpoint can be given as `base_url` instead.
+When the table does not resolve (a key that is not set, a provider of
+another kind, no model), kage says why on stderr and starts without
+the tool.
+
+The image comes back with the call: the TUI, the desktop and editors
+show it, it stays in the session, and a model that reads images in
+tool results (Claude) sees it. `/image save` writes it into the
+project. A call may also name a `path` in the workspace to save it
+there at once; an existing file is never replaced, and a path outside
+the workspace is refused before the server is asked. A server that
+answers with a link instead of the image is refused, because kage does
+not fetch it.
+
+The tool counts as a write: plan mode and a read-only session refuse
+it, as they refuse `write`, and permission rules name it
+`generate_image`. Each call costs a generation, so to approve each one
+first:
+
+```toml
+[permissions.tools.generate_image]
+default = "ask"
+```
 
 ## environment variables
 

@@ -481,7 +481,8 @@ pub(crate) enum McpAction {
 pub(crate) enum AuthAction {
     /// Save an API key for a provider, prompting for it without echo.
     Login {
-        /// Provider id. Omit to pick from a list.
+        /// Provider id, or `generate_image` for the key the image tool
+        /// sends to its `base_url`. Omit to pick from a list.
         provider: Option<String>,
     },
     /// Remove a saved API key.

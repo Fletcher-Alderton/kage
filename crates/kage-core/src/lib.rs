@@ -13,6 +13,7 @@ pub mod error;
 pub mod event;
 pub mod fsutil;
 pub mod highlight;
+pub mod image;
 pub mod keymap;
 pub mod message;
 pub mod modality;

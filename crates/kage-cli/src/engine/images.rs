@@ -93,7 +93,12 @@ fn produced_image(path: &Path, sha256: Option<&str>) -> Option<(String, Vec<u8>)
 
 /// Writes `bytes` to `dest` (relative to `workdir`) or to a new file
 /// under `workdir/generated/`, taking a free name, and returns where.
-fn save(workdir: &Path, dest: Option<&Path>, mime: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+pub(super) fn save(
+    workdir: &Path,
+    dest: Option<&Path>,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
     let target = dest.map_or_else(
         || {
             let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");

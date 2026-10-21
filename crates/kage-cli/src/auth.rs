@@ -596,14 +596,16 @@ fn write_list<W: Write>(
     Ok(())
 }
 
-/// `true` when `target` names a provider `kage auth login` can store a
-/// credential for: a builtin or catalog id, or a custom provider
-/// declared under `[providers.custom.*]`.
+/// `true` when `target` names what `kage auth login` can store a
+/// credential for: a builtin or catalog id, a custom provider declared
+/// under `[providers.custom.*]`, or the `generate_image` tool's endpoint.
 fn login_target_is_known(
     target: &str,
     custom: &BTreeMap<String, kage_core::config::CustomProviderConfig>,
 ) -> bool {
-    KNOWN_PROVIDERS.contains(&target) || custom.contains_key(target)
+    KNOWN_PROVIDERS.contains(&target)
+        || custom.contains_key(target)
+        || target == crate::engine::GENERATE_IMAGE_TOOL
 }
 
 fn select_provider(
@@ -617,6 +619,7 @@ fn select_provider(
         }
         let mut known: Vec<&str> = KNOWN_PROVIDERS.to_vec();
         known.extend(custom.keys().map(String::as_str));
+        known.push(crate::engine::GENERATE_IMAGE_TOOL);
         return Err(format!(
             "unknown provider '{p}', expected one of: {}",
             known.join(", ")
@@ -910,6 +913,10 @@ mod tests {
         assert!(login_target_is_known("anthropic", &config.providers.custom));
         assert!(!login_target_is_known("acp", &config.providers.custom));
         assert!(!login_target_is_known("nope", &config.providers.custom));
+        assert!(login_target_is_known(
+            "generate_image",
+            &config.providers.custom
+        ));
 
         let mut config = kage_core::config::Config::default();
         config.providers.custom.insert(

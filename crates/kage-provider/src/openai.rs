@@ -15,7 +15,9 @@ use crate::{
     StopReason, StreamRequest, ToolSpec,
 };
 
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+/// The `OpenAI` API's base URL, used unless `[providers.openai]` sets
+/// another.
+pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
 
 /// `OpenAI` Chat Completions provider.

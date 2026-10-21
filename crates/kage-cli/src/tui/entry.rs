@@ -11,6 +11,8 @@ use kage_plugin::LogLevel;
 use kage_tui::TranscriptScope;
 use kage_tui::hostlog::LogPublisher;
 
+use crate::engine::WithImageGeneration as _;
+
 /// Drop into the interactive TUI, on the recorded session at `resume`
 /// when given, the way the session picker resumes one. A session
 /// another process holds is attached to through the `kage serve`
@@ -166,6 +168,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     let tools = kage_tools::builtin_registry()
         .with_shell_config(&app_config.shell)
         .with_web_search(&app_config.tools.web_search)
+        .with_image_generation(&app_config)
         .with_renames(&app_config.tools.rename);
     let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {

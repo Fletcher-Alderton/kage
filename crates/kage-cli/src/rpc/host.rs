@@ -21,7 +21,7 @@ use kage_tools::{ToolRegistry, builtin_registry};
 
 use super::options::{Settings, choice};
 use super::{CliAcpAgent, live::Live, mcp};
-use crate::engine::{AgentSetup, Background, Engine, SessionSpec};
+use crate::engine::{AgentSetup, Background, Engine, SessionSpec, WithImageGeneration as _};
 use crate::permissions::PermissionGate;
 
 /// Builds the engine session for a client session from the providers
@@ -440,6 +440,7 @@ fn session_spec(
     let mut tools = builtin_registry()
         .with_shell_config(&config.shell)
         .with_web_search(&config.tools.web_search)
+        .with_image_generation(&config)
         .with_renames(&config.tools.rename);
     let aliases = tools.alias_map();
     let editor: Vec<String> = servers.keys().cloned().collect();

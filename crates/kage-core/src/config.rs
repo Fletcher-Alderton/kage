@@ -58,7 +58,8 @@ pub struct Config {
     pub tools: ToolsConfig,
 }
 
-/// Tool naming overrides.
+/// Tool naming overrides and the settings of the configured built-in
+/// tools.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
@@ -71,13 +72,66 @@ pub struct ToolsConfig {
     /// The engine the `web_search` tool asks (`[tools.web_search]`).
     #[serde(default, skip_serializing_if = "WebSearchConfig::is_default")]
     pub web_search: WebSearchConfig,
+    /// The images endpoint the `generate_image` tool calls
+    /// (`[tools.generate_image]`). Without one the tool is not
+    /// registered.
+    #[serde(default, skip_serializing_if = "GenerateImageConfig::is_default")]
+    pub generate_image: GenerateImageConfig,
 }
 
 impl ToolsConfig {
     /// Whether nothing is configured.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.rename.is_empty() && self.web_search.is_default()
+        self.rename.is_empty() && self.web_search.is_default() && self.generate_image.is_default()
+    }
+}
+
+/// The images endpoint the `generate_image` tool calls
+/// (`[tools.generate_image]`), which speaks the `OpenAI` Images API:
+/// `POST {base_url}/images/generations`.
+///
+/// The endpoint is either a provider kage already reaches, reused with
+/// its base URL, key and headers (`provider`), or named outright
+/// (`base_url`, with `api_key_env` and `headers`). `base_url` wins when
+/// both are set. A project's `.kage/config.toml` never sets this table,
+/// because it names where a key is sent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GenerateImageConfig {
+    /// The provider whose base URL, key and headers the tool reuses:
+    /// `openai`, an OpenAI-compatible provider kage ships, or a
+    /// `[providers.custom.<id>]` of kind `openai`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The endpoint's base URL, without `/images/generations`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// The environment variable holding the key sent to `base_url`.
+    /// Unset or empty, the key saved with `kage auth login
+    /// generate_image` is sent instead, and with neither no key is sent.
+    /// A variable named here with no saved key to fall back on leaves the
+    /// tool out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Extra HTTP headers sent to `base_url`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// The image model asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Seconds one generation may take, the whole request included, from
+    /// 1 to 3600. Defaults to 180.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl GenerateImageConfig {
+    /// Whether the defaults are in effect, which leaves the tool
+    /// unregistered.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -255,8 +309,8 @@ impl Config {
     /// The project file's `mcp`, `permissions` and
     /// `plugins.capabilities` tables are dropped unless the project is
     /// trusted (see [`crate::trust`]). The project file's `providers`,
-    /// `acp` and `plugins.registry` never apply: those are only read from
-    /// the user config.
+    /// `acp`, `plugins.registry` and `tools.generate_image` never apply:
+    /// those are only read from the user config.
     /// `plugins.disabled` is the union of the user's list and the
     /// winning layer's, so a project can disable a plugin but never
     /// enable one the user disabled.

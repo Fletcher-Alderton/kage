@@ -12,6 +12,7 @@
 mod agent_tool;
 mod agents;
 mod bus;
+mod image_tool;
 mod images;
 mod mailbox_tool;
 mod mcp;
@@ -54,6 +55,7 @@ use kage_tools::ToolRegistry;
 use self::swarm_tool::SwarmInfo;
 
 pub(crate) use bus::{Subscriber, SubscriptionId};
+pub(crate) use image_tool::{GENERATE_IMAGE_TOOL, WithImageGeneration};
 pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
 
