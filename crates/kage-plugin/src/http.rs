@@ -32,6 +32,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kage_core::sync::lock;
@@ -129,13 +130,19 @@ fn simple_function(lua: &Lua, method: &'static str, name: &'static str) -> mlua:
             let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
             let result = if tasks::is_driven(&lua) {
                 let target = url.clone();
-                tasks::off_thread(move || {
-                    simple_request(method, &target, Some(&request), max_bytes)
+                tasks::off_thread_stoppable(&lua, move |stop| {
+                    simple_request(method, &target, Some(&request), max_bytes, stop)
                 })
                 .await
                 .unwrap_or_else(|| Err("the request thread panicked".to_owned()))
             } else {
-                simple_request(method, &url, Some(&request), max_bytes)
+                simple_request(
+                    method,
+                    &url,
+                    Some(&request),
+                    max_bytes,
+                    &AtomicBool::new(false),
+                )
             };
             simple_result_to_table(&lua, &result.map_err(fail)?)
         },
@@ -253,6 +260,21 @@ fn header_map(headers: &ureq::http::HeaderMap) -> BTreeMap<String, String> {
     map
 }
 
+/// A reader that ends with an error once `stop` is set.
+struct Stoppable<'a, R> {
+    inner: R,
+    stop: &'a AtomicBool,
+}
+
+impl<R: Read> Read for Stoppable<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.stop.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("stopped"));
+        }
+        self.inner.read(buf)
+    }
+}
+
 /// Reads `reader` up to `max_bytes` plus one lookahead byte, reporting
 /// whether the body was cut at `max_bytes`. The lookahead is what makes
 /// `truncated` exact; it saturates so a maximal `max_bytes` means "no
@@ -268,11 +290,14 @@ fn read_capped(reader: impl Read, max_bytes: u64) -> (Vec<u8>, bool) {
     (buf, truncated)
 }
 
+/// Make one buffered request. Once `stop` is set the body is no longer
+/// read, which closes the connection.
 fn simple_request(
     method: &str,
     url: &str,
     spec: Option<&RequestSpec>,
     max_bytes: u64,
+    stop: &AtomicBool,
 ) -> Result<SimpleResult, String> {
     let timeout = spec.and_then(|s| s.timeout).unwrap_or(DEFAULT_TIMEOUT);
     let (parsed, agent) = prepare(url, Some(timeout))?;
@@ -285,7 +310,11 @@ fn simple_request(
         .unwrap_or("")
         .to_owned();
     let headers = header_map(response.headers());
-    let (buf, truncated) = read_capped(response.into_body().into_reader(), max_bytes);
+    let reader = Stoppable {
+        inner: response.into_body().into_reader(),
+        stop,
+    };
+    let (buf, truncated) = read_capped(reader, max_bytes);
     Ok(SimpleResult {
         status,
         body: String::from_utf8_lossy(&buf).into_owned(),

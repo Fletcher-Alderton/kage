@@ -337,7 +337,7 @@ built-in `read` or `shell`. Spec fields:
   schema      = { type = "object" },          -- json schema, required
   risk        = "read",                       -- "read" | "write" | "exec" | "network"
   parallel    = false,                        -- let a batch of calls run at once
-  execute     = function(input) ... end,      -- (table) -> string or table
+  execute     = function(input, ctx) ... end, -- (table, ctx) -> string or table
 }
 ```
 
@@ -349,10 +349,17 @@ coroutine. While it waits in `kage.http.*`, `kage.exec` or
 `kage.sleep_ms` it yields, so other tool calls, commands, events and
 renders run in between, and calls can overlap. Code that busy-loops
 without calling any of these still holds the thread until it returns.
-Cancelling a call ends `execute` where it is waiting: it never resumes,
-and a request already on the wire, or a process already started, runs
-to its end unread. Since calls can overlap, state a handler
-keeps between waits may change under it.
+Cancelling a call ends `execute` where it is waiting, and it never
+resumes. A process it started with `kage.exec` is killed, and a
+`kage.http` request stops reading its body; one still connecting or
+waiting for the server's answer runs to its timeout unread. Since
+calls can overlap, state a handler keeps between waits may change
+under it.
+
+`ctx.update(text, structured?)` reports progress while the call runs,
+such as `"crawled 12 of 40 pages"`. Clients show the latest update
+with the call until its result arrives. After the call ends, `update`
+does nothing.
 
 With `parallel = true`, a batch made only of calls to such tools runs
 at once, as the built-in `web_search` does. Leave it off for a tool

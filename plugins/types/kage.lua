@@ -173,7 +173,7 @@
 ---@field schema table JSON schema for the input object.
 ---@field risk? kage.ToolRisk Permission tier; defaults to read.
 ---@field parallel? boolean Let a batch of calls to this tool run at once; defaults to false.
----@field execute fun(input: table): string|kage.ToolResult|boolean|number|nil Tool body.
+---@field execute fun(input: table, ctx: { update: fun(text: string, structured?: table) }): string|kage.ToolResult|boolean|number|nil Tool body. `ctx.update` reports progress while it runs.
 
 --- One declared command argument.
 ---@class kage.CommandArg

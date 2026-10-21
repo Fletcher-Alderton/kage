@@ -11,7 +11,7 @@
 //! they always did, which keeps commands and hooks unchanged.
 
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::future::{Future, poll_fn};
 use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,11 +29,12 @@ use crate::watchdog;
 pub(crate) type Task = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Tasks waiting for the owner loop to adopt them, and the coroutines
-/// being driven, by their thread pointer.
+/// being driven, by their thread pointer, with the switch that stops
+/// each.
 #[derive(Default)]
 struct Registry {
     spawned: RefCell<Vec<Task>>,
-    driven: RefCell<HashSet<usize>>,
+    driven: RefCell<HashMap<usize, Arc<Abort>>>,
 }
 
 /// Prepare `lua` to drive coroutines.
@@ -61,7 +62,14 @@ pub(crate) fn take_spawned(lua: &Lua) -> Vec<Task> {
 pub(crate) fn is_driven(lua: &Lua) -> bool {
     let key = lua.current_thread().to_pointer() as usize;
     lua.app_data_ref::<Registry>()
-        .is_some_and(|registry| registry.driven.borrow().contains(&key))
+        .is_some_and(|registry| registry.driven.borrow().contains_key(&key))
+}
+
+/// The switch that stops the running driven coroutine.
+fn current_abort(lua: &Lua) -> Option<Arc<Abort>> {
+    let key = lua.current_thread().to_pointer() as usize;
+    lua.app_data_ref::<Registry>()
+        .and_then(|registry| registry.driven.borrow().get(&key).cloned())
 }
 
 /// Run `func` with `args` as a driven coroutine. The future resolves to
@@ -71,11 +79,23 @@ pub(crate) fn drive<R: FromLuaMulti + Send + 'static>(
     func: Function,
     args: impl IntoLuaMulti,
 ) -> mlua::Result<impl Future<Output = mlua::Result<R>> + Send + 'static> {
+    drive_until(lua, func, args, Arc::default())
+}
+
+/// [`drive`], stopped by `abort`: await the future through
+/// [`abortable`] with the same switch, and work the coroutine waits on
+/// through [`off_thread_stoppable`] stops with it.
+pub(crate) fn drive_until<R: FromLuaMulti + Send + 'static>(
+    lua: &Lua,
+    func: Function,
+    args: impl IntoLuaMulti,
+    abort: Arc<Abort>,
+) -> mlua::Result<impl Future<Output = mlua::Result<R>> + Send + 'static> {
     let thread = lua.create_thread(func)?;
     watchdog::install_on_thread(&thread).map_err(mlua::Error::external)?;
     let key = thread.to_pointer() as usize;
     if let Some(registry) = lua.app_data_ref::<Registry>() {
-        registry.driven.borrow_mut().insert(key);
+        registry.driven.borrow_mut().insert(key, abort);
     }
     let guard = Driven {
         lua: lua.clone(),
@@ -154,6 +174,17 @@ pub(crate) fn off_thread<T: Send + 'static>(
         spawned.ok()?;
         rx.recv().await
     }
+}
+
+/// Like [`off_thread`], for work a driven coroutine waits on: `work` is
+/// handed a flag that is set once the coroutine is aborted (see
+/// [`drive_until`]), so it can stop early.
+pub(crate) fn off_thread_stoppable<T: Send + 'static>(
+    lua: &Lua,
+    work: impl FnOnce(&AtomicBool) -> T + Send + 'static,
+) -> impl Future<Output = Option<T>> + Send + 'static {
+    let abort = current_abort(lua).unwrap_or_default();
+    off_thread(move || work(&abort.aborted))
 }
 
 /// Wait `duration` without holding the owner thread.

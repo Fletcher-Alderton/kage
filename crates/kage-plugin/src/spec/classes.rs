@@ -76,8 +76,8 @@ pub(super) const CLASSES: &[Class] = &[
             },
             Field {
                 name: "execute",
-                ty: "fun(input: table): string|kage.ToolResult|boolean|number|nil",
-                doc: "Tool body.",
+                ty: "fun(input: table, ctx: { update: fun(text: string, structured?: table) }): string|kage.ToolResult|boolean|number|nil",
+                doc: "Tool body. `ctx.update` reports progress while it runs.",
             },
         ],
     },

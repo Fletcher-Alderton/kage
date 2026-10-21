@@ -9,7 +9,7 @@
 //! process exits or `timeout_secs` elapses (default 30) and returns
 //! its captured output plus `timed_out` and `truncated` flags, the way
 //! `kage.http.get` does: inside a driven coroutine the wait yields, and
-//! anywhere else it blocks. A rewind plugin uses it to snapshot files
+//! a cancelled tool call kills the process; anywhere else it blocks. A rewind plugin uses it to snapshot files
 //! with `git` between turns. Each stream keeps at most 1 MB; output
 //! past that is dropped and the `truncated` flag is set.
 //!
@@ -23,6 +23,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -119,11 +120,13 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
                                 mlua::Error::external(format!("kage.exec: spawn {cmd}: {e}"))
                             })?;
                         let finished = if tasks::is_driven(&lua) {
-                            tasks::off_thread(move || wait_for(child, timeout))
-                                .await
-                                .unwrap_or_else(|| Err("the waiting thread panicked".into()))
+                            tasks::off_thread_stoppable(&lua, move |stop| {
+                                wait_for(child, timeout, stop)
+                            })
+                            .await
+                            .unwrap_or_else(|| Err("the waiting thread panicked".into()))
                         } else {
-                            wait_for(child, timeout)
+                            wait_for(child, timeout, &AtomicBool::new(false))
                         }
                         .map_err(|e| {
                             mlua::Error::external(format!("kage.exec: wait {cmd}: {e}"))
@@ -151,9 +154,9 @@ struct Finished {
     stderr: Vec<u8>,
 }
 
-/// Wait for `child` to exit, killing it once `timeout` passes, and
-/// collect its output.
-fn wait_for(mut child: Child, timeout: Duration) -> Result<Finished, String> {
+/// Wait for `child` to exit, killing it once `timeout` passes or `stop`
+/// is set, and collect its output.
+fn wait_for(mut child: Child, timeout: Duration, stop: &AtomicBool) -> Result<Finished, String> {
     // Drain each pipe on its own thread so a child that outgrows the OS
     // pipe buffer never stalls on a full pipe while we wait for it.
     let stdout_thread = child
@@ -169,6 +172,10 @@ fn wait_for(mut child: Child, timeout: Duration) -> Result<Finished, String> {
     let status = loop {
         match reaper::try_wait(&mut child).map_err(|e| e.to_string())? {
             Some(status) => break status,
+            None if stop.load(Ordering::SeqCst) => {
+                let _ = child.kill();
+                break reaper::wait(&mut child).map_err(|e| e.to_string())?;
+            }
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 timed_out = true;
@@ -279,6 +286,43 @@ mod tests {
             start.elapsed()
         );
         assert_eq!(waiting.join().unwrap(), "slow");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cancelling_a_tool_kills_its_process() {
+        use std::time::Duration;
+
+        use kage_core::CancelFlag;
+        use kage_tools::{ToolContext, ToolError};
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("finished");
+        let rt = rt_with_exec();
+        rt.eval_plugin(
+            "p",
+            &format!(
+                "kage.request_capabilities({{'exec'}}); \
+                 kage.register_tool({{ name = 'long', description = '', \
+                     execute = function() \
+                         kage.exec({{ cmd = 'sh', args = {{ '-c', 'sleep 0.4; touch {}' }} }}) \
+                     end }})",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        let tool = rt.registered_tools().pop().unwrap();
+        let cancel = CancelFlag::new();
+        let flag = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            flag.cancel();
+        });
+        let workdir = std::path::PathBuf::from(".");
+        let result = tool.execute(serde_json::json!({}), &ToolContext::new(&workdir, &cancel));
+        assert!(matches!(result, Err(ToolError::Cancelled)), "{result:?}");
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(!marker.exists(), "the process ran on after the cancel");
     }
 
     #[test]

@@ -15,13 +15,16 @@
 //! runtime's Lua owner thread (see [`crate::tasks`]), so while it waits
 //! on `kage.http` or `kage.sleep_ms` other calls and plugins run. The
 //! calling thread waits for the result; once the call is cancelled it
-//! gives up, and the handler is dropped where it was waiting.
+//! gives up, and the handler is dropped where it was waiting. The
+//! handler's second argument, `ctx`, reports progress with
+//! `ctx.update(text, structured?)`.
 
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::select_biased;
+use kage_core::ToolUpdate;
 use kage_core::{Risk, ToolOutput, sync::lock};
-use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
+use kage_tools::{ExecMode, ProgressSink, Tool, ToolContext, ToolError};
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
@@ -109,6 +112,7 @@ impl Tool for LuaTool {
             sink: Arc::clone(&self.sink),
             key: Arc::clone(&self.handler_key),
             abort: Arc::clone(&abort),
+            progress: Arc::new(Mutex::new(cx.progress_sink())),
             tx,
         };
         match self
@@ -137,6 +141,8 @@ struct Call {
     sink: SharedHostLog,
     key: Arc<RegistryKey>,
     abort: Arc<Abort>,
+    /// Where `ctx.update` reports, until the call ends.
+    progress: Arc<Mutex<Option<Arc<dyn ProgressSink>>>>,
     tx: crossbeam_channel::Sender<ToolOutput>,
 }
 
@@ -149,14 +155,19 @@ impl Call {
             sink,
             key,
             abort,
+            progress,
             tx,
         } = self;
         let failed = |e: mlua::Error| ToolError::Other(format!("plugin tool '{name}': {e}"));
         let func: Function = lua.registry_value(&key).map_err(failed)?;
         let input = json_to_lua(lua, input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        let run = tasks::drive::<Value>(lua, func, input).map_err(failed)?;
+        let ctx = context_table(lua, &progress).map_err(failed)?;
+        let run = tasks::drive_until::<Value>(lua, func, (input, ctx), Arc::clone(&abort))
+            .map_err(failed)?;
         tasks::spawn(lua, async move {
-            let Some(returned) = tasks::abortable(run, abort).await else {
+            let returned = tasks::abortable(run, abort).await;
+            lock(&progress).take();
+            let Some(returned) = returned else {
                 return;
             };
             let output = match returned {
@@ -179,6 +190,29 @@ impl Call {
         });
         Ok(())
     }
+}
+
+/// The `ctx` a handler gets: `update(text, structured?)` reports
+/// progress to `progress` while the call runs, and does nothing after.
+fn context_table(
+    lua: &Lua,
+    progress: &Arc<Mutex<Option<Arc<dyn ProgressSink>>>>,
+) -> mlua::Result<Table> {
+    let progress = Arc::clone(progress);
+    let ctx = lua.create_table()?;
+    ctx.set(
+        "update",
+        lua.create_function(move |_, (text, structured): (String, Option<Value>)| {
+            if let Some(sink) = lock(&progress).as_ref() {
+                sink.emit(ToolUpdate {
+                    content: text,
+                    structured: structured.and_then(|value| lua_to_json(value).ok()),
+                });
+            }
+            Ok(())
+        })?,
+    )?;
+    Ok(ctx)
 }
 
 fn value_to_output(value: Value) -> ToolOutput {
@@ -434,6 +468,41 @@ mod tests {
         };
         assert_eq!(mode("one"), None);
         assert_eq!(mode("many"), Some(ExecMode::Parallel));
+    }
+
+    #[test]
+    fn a_tool_reports_progress_while_it_runs() {
+        struct Collect(Mutex<Vec<ToolUpdate>>);
+        impl ProgressSink for Collect {
+            fn emit(&self, update: ToolUpdate) {
+                lock(&self.0).push(update);
+            }
+        }
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_tool({ name = 'crawl', description = '',
+                execute = function(_, ctx)
+                    ctx.update('polling')
+                    ctx.update('3 pages', { pages = 3 })
+                    kept = ctx
+                    return 'done'
+                end })
+            ",
+        )
+        .unwrap();
+        let tool = rt.registered_tools().pop().unwrap();
+        let updates = Arc::new(Collect(Mutex::default()));
+        let cancel = CancelFlag::new();
+        let workdir = PathBuf::from("/tmp");
+        let cx = ToolContext::new(&workdir, &cancel)
+            .with_progress(Arc::clone(&updates) as Arc<dyn ProgressSink>);
+        assert_eq!(tool.execute(json!({}), &cx).unwrap().text, "done");
+        rt.eval("kept.update('late')").unwrap();
+        let updates = lock(&updates.0);
+        assert_eq!(updates.len(), 2, "{updates:?}");
+        assert_eq!(updates[0].content, "polling");
+        assert_eq!(updates[1].structured, Some(json!({ "pages": 3 })));
     }
 
     #[test]
