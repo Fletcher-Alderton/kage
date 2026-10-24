@@ -236,6 +236,15 @@ pub(crate) enum Command {
         /// System-prompt role override forwarded to the agent loop.
         #[arg(long = "system", default_value = "")]
         system: String,
+        /// A file whose contents are appended to the system prompt.
+        ///
+        /// For a prompt too long or too private to spell out on the
+        /// command line, which `/proc/<pid>/cmdline` publishes to every
+        /// user on the host. Read once, before any session starts; a
+        /// file that cannot be read is an error rather than a session
+        /// that starts without its instructions.
+        #[arg(long = "system-file", value_name = "PATH")]
+        system_file: Option<PathBuf>,
         /// Start every session in allow mode: every tool call runs
         /// without asking, MCP servers included. A configured deny
         /// still denies, and a client may still change the mode.
@@ -542,8 +551,10 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
         Command::Rpc {
             model,
             system,
+            system_file,
             yolo,
-        } => config_error().unwrap_or_else(|| rpc::run(model.as_deref(), &system, yolo)),
+        } => config_error()
+            .unwrap_or_else(|| rpc::run(model.as_deref(), &system, system_file.as_deref(), yolo)),
         Command::Serve {
             model,
             system,

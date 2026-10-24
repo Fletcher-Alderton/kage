@@ -139,9 +139,21 @@ fn redact_secrets(config: &mut Config) {
 }
 
 /// Entry point for the `Rpc` subcommand.
-pub(crate) fn run(model_override: Option<&str>, system_role: &str, yolo: bool) -> ExitCode {
+pub(crate) fn run(
+    model_override: Option<&str>,
+    system_role: &str,
+    system_file: Option<&Path>,
+    yolo: bool,
+) -> ExitCode {
+    let system_role = match resolve_system(system_role, system_file) {
+        Ok(system_role) => system_role,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
     kage_core::reaper::start();
-    let served = Host::start(model_override, system_role, yolo)
+    let served = Host::start(model_override, &system_role, yolo)
         .map_err(|e| format!("rpc: {e}"))
         .and_then(|host| {
             host.serve(BufReader::new(std::io::stdin()), std::io::stdout())
@@ -153,6 +165,28 @@ pub(crate) fn run(model_override: Option<&str>, system_role: &str, yolo: bool) -
             eprintln!("kage: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// The system prompt a run starts with: the inline text, with the
+/// contents of `file` appended when one was given.
+///
+/// The file exists so a caller can keep a long or private prompt out of
+/// its own command line, which `/proc/<pid>/cmdline` publishes to every
+/// user on the host. Reading it once here rather than per session gives
+/// the failure one path: a file that cannot be read stops the run,
+/// instead of starting sessions that quietly lack their instructions.
+fn resolve_system(inline: &str, file: Option<&Path>) -> Result<String, String> {
+    let Some(file) = file else {
+        return Ok(inline.to_owned());
+    };
+    let appended = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read the system prompt at {}: {e}", file.display()))?;
+    let appended = appended.trim_end();
+    match (inline.trim().is_empty(), appended.is_empty()) {
+        (true, _) => Ok(appended.to_owned()),
+        (false, true) => Ok(inline.to_owned()),
+        (false, false) => Ok(format!("{inline}\n\n{appended}")),
     }
 }
 

@@ -6329,3 +6329,31 @@ fn a_state_observed_after_a_fresh_attach_reaches_the_link_replay() {
             .collect::<Vec<_>>()
     );
 }
+
+/// A caller with a long or private prompt has to be able to keep it off the
+/// command line, where `/proc/<pid>/cmdline` publishes it to every user on
+/// the host. The file is appended rather than replacing the inline text, so
+/// a fixed role and a session's own instructions can arrive separately.
+#[test]
+fn the_system_prompt_can_come_from_a_file() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let path = dir.path().join("prompt.md");
+    std::fs::write(&path, "house rules\n").expect("written");
+
+    assert_eq!(resolve_system("", Some(&path)).unwrap(), "house rules");
+    assert_eq!(
+        resolve_system("a role", Some(&path)).unwrap(),
+        "a role\n\nhouse rules"
+    );
+    assert_eq!(resolve_system("a role", None).unwrap(), "a role");
+}
+
+/// A session that starts without its instructions is worse than one that
+/// does not start, so an unreadable file is an error the caller sees.
+#[test]
+fn an_unreadable_system_prompt_file_stops_the_run() {
+    let error = resolve_system("a role", Some(Path::new("/nonexistent/prompt.md")))
+        .expect_err("a missing file must be refused");
+
+    assert!(error.contains("/nonexistent/prompt.md"), "{error}");
+}

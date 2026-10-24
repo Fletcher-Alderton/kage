@@ -15,6 +15,10 @@ Optional flags:
 
 - `-m, --model <provider/model>` pins the model for the connection.
 - `--system <text>` overrides the system-prompt role.
+- `--system-file <path>` appends the contents of a file to that role.
+  Use it for a prompt too long or too private to spell out on the
+  command line, which `/proc/<pid>/cmdline` publishes to every user on
+  the host.
 - `--yolo` opens every session in allow mode: every tool call runs
   without asking, while configured denies still deny. Meant for
   unattended clients that cannot answer a permission request.
