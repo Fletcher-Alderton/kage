@@ -9,21 +9,20 @@
 //!
 //! The reaper cannot know which children a caller still intends to
 //! wait on, so every status it collects is recorded, and the
-//! [`try_wait`], [`wait`], and [`output`] wrappers fall back to that
-//! record when the kernel reports `ECHILD` because the reaper won the
+//! [`try_wait`] and [`wait`] wrappers fall back to that record
+//! when the kernel reports `ECHILD` because the reaper won the
 //! race to a tracked child.
 
 use std::io;
 use std::process::{Child, ExitStatus};
 
-pub use imp::{drain, output, start, try_wait, wait};
+pub use imp::{drain, start, try_wait, wait};
 
 #[cfg(unix)]
 mod imp {
     use super::{Child, ExitStatus, io};
     use std::collections::HashMap;
     use std::os::unix::process::ExitStatusExt;
-    use std::process::{Command, Stdio};
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
@@ -142,29 +141,6 @@ mod imp {
         }
     }
 
-    /// Like [`Command::output`], but the final wait is reaper-safe.
-    pub fn output(command: &mut Command) -> io::Result<std::process::Output> {
-        use std::io::Read;
-
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut stdout_pipe = child.stdout.take().expect("piped stdout");
-        let mut stderr_pipe = child.stderr.take().expect("piped stderr");
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        stdout_pipe.read_to_end(&mut stdout)?;
-        stderr_pipe.read_to_end(&mut stderr)?;
-        let status = wait(&mut child)?;
-        Ok(std::process::Output {
-            status,
-            stdout,
-            stderr,
-        })
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -241,7 +217,6 @@ mod imp {
 #[cfg(not(unix))]
 mod imp {
     use super::{Child, ExitStatus, io};
-    use std::process::{Command, Output};
 
     /// Nothing to start: only Unix reaps orphaned children.
     pub fn start() {}
@@ -257,10 +232,5 @@ mod imp {
     /// [`Child::wait`], as no reaper takes statuses here.
     pub fn wait(child: &mut Child) -> io::Result<ExitStatus> {
         child.wait()
-    }
-
-    /// [`Command::output`], as no reaper takes statuses here.
-    pub fn output(command: &mut Command) -> io::Result<Output> {
-        command.output()
     }
 }
