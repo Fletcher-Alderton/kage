@@ -5,15 +5,17 @@
 //! dropped. Nothing is merged: the agent's report says where its work
 //! is and how to take it.
 
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use kage_core::SessionId;
 use kage_core::reaper;
+use kage_core::sync::lock;
 
 /// One agent's checkout. Dropping it removes the checkout in the
 /// background, without blocking the caller; work the agent left stays
@@ -165,6 +167,12 @@ impl Worktree {
 /// stuck VCS cannot hold the cleanup thread forever.
 const DROP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a pipe may stay open after the child has exited. The
+/// child's own writers are gone by then, so everything it wrote is
+/// already buffered; the grace only covers the reader's final copy
+/// before giving up on an orphaned grandchild holding the pipe open.
+const DRAIN_GRACE: Duration = Duration::from_millis(250);
+
 /// Drop-path cleanups started but not finished. Production drops are
 /// detached and unsignalled; only tests wait for this to reach zero.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -268,8 +276,10 @@ fn run(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
 }
 
 /// Like [`run`], but the child is killed once it outlives
-/// [`DROP_COMMAND_TIMEOUT`]: a drop must never wait on a stuck VCS
-/// forever.
+/// [`DROP_COMMAND_TIMEOUT`], and a pipe still open after the child
+/// exits is drained for [`DRAIN_GRACE`] at most: a drop must never
+/// wait on a stuck VCS forever, not even on an orphaned grandchild
+/// holding a pipe open.
 fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
     let mut command = Command::new(program);
     command.args(args).current_dir(dir);
@@ -281,8 +291,8 @@ fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, Strin
         .map_err(|err| format!("{program}: {err}"))?;
     // Drain both pipes while polling: a child that fills a pipe would
     // otherwise block until the deadline and be killed.
-    let stdout = child.stdout.take().and_then(drain);
-    let stderr = child.stderr.take().and_then(drain);
+    let stdout = child.stdout.take().and_then(Drain::start);
+    let stderr = child.stderr.take().and_then(Drain::start);
     let deadline = Instant::now() + DROP_COMMAND_TIMEOUT;
     let status = loop {
         match reaper::try_wait(&mut child) {
@@ -300,8 +310,9 @@ fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, Strin
         }
         std::thread::sleep(Duration::from_millis(25));
     };
-    let stdout = collect(stdout);
-    let stderr = collect(stderr);
+    let cutoff = Instant::now() + DRAIN_GRACE;
+    let stdout = stdout.map(|drain| drain.take(cutoff)).unwrap_or_default();
+    let stderr = stderr.map(|drain| drain.take(cutoff)).unwrap_or_default();
     if status.success() {
         Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
     } else {
@@ -313,23 +324,49 @@ fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, Strin
     }
 }
 
-/// Read `pipe` to EOF on its own thread. `None` when no thread could
-/// be started; the pipe is then closed, so the child cannot block on it.
-fn drain(mut pipe: impl Read + Send + 'static) -> Option<JoinHandle<Vec<u8>>> {
-    std::thread::Builder::new()
-        .spawn(move || {
-            let mut buf = Vec::new();
-            let _ = pipe.read_to_end(&mut buf);
-            buf
-        })
-        .ok()
+/// A pipe drained into a shared buffer on its own thread, so the
+/// child never blocks on a full pipe.
+struct Drain {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    handle: JoinHandle<()>,
 }
 
-/// What a [`drain`] thread read, or nothing if it never ran.
-fn collect(reader: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    reader
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default()
+impl Drain {
+    /// Start draining `pipe`. `None` when no thread could be started;
+    /// the pipe is then closed, so the child cannot block on it.
+    fn start(pipe: impl Read + Send + 'static) -> Option<Self> {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::clone(&buffer);
+        let handle = std::thread::Builder::new()
+            .spawn(move || {
+                let mut pipe = pipe;
+                let mut chunk = [0; 8192];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => lock(&shared).extend_from_slice(&chunk[..n]),
+                        Err(err) if err.kind() == ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { buffer, handle })
+    }
+
+    /// Everything read so far, waiting for EOF until `cutoff` at most.
+    /// A reader still running then is detached with what it has: an
+    /// orphaned grandchild holding the pipe open must not extend the
+    /// wait.
+    fn take(self, cutoff: Instant) -> Vec<u8> {
+        while !self.handle.is_finished() && Instant::now() < cutoff {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if self.handle.is_finished() {
+            let _ = self.handle.join();
+        }
+        std::mem::take(&mut lock(&self.buffer))
+    }
 }
 
 /// The last line of a diff stat, or `None` when nothing changed.
@@ -493,6 +530,23 @@ mod tests {
         let script = "head -c 200000 /dev/zero | tr '\\0' a; head -c 200000 /dev/zero >&2";
         let out = run_bounded(dir.path(), "sh", &["-c", script]).unwrap();
         assert_eq!(out.len(), 200_000);
+    }
+
+    /// A command that exits at once but leaves an orphaned grandchild
+    /// holding stdout open returns with its output instead of waiting
+    /// for the grandchild to let go of the pipe.
+    #[cfg(unix)]
+    #[test]
+    fn an_orphaned_grandchild_does_not_extend_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let out = run_bounded(dir.path(), "sh", &["-c", "printf ready; sleep 5 &"]).unwrap();
+        assert_eq!(out, "ready");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "waited {:?} for a grandchild holding the pipe",
+            started.elapsed()
+        );
     }
 
     /// A drop whose cleanup command hangs must return at once, and the
