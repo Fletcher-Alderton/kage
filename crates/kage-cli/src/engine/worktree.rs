@@ -5,10 +5,11 @@
 //! dropped. Nothing is merged: the agent's report says where its work
 //! is and how to take it.
 
-use std::io::Read as _;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use kage_core::SessionId;
@@ -278,6 +279,10 @@ fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, Strin
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("{program}: {err}"))?;
+    // Drain both pipes while polling: a child that fills a pipe would
+    // otherwise block until the deadline and be killed.
+    let stdout = child.stdout.take().and_then(drain);
+    let stderr = child.stderr.take().and_then(drain);
     let deadline = Instant::now() + DROP_COMMAND_TIMEOUT;
     let status = loop {
         match reaper::try_wait(&mut child) {
@@ -295,14 +300,8 @@ fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, Strin
         }
         std::thread::sleep(Duration::from_millis(25));
     };
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_end(&mut stdout);
-    }
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_end(&mut stderr);
-    }
+    let stdout = collect(stdout);
+    let stderr = collect(stderr);
     if status.success() {
         Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
     } else {
@@ -312,6 +311,25 @@ fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, Strin
             String::from_utf8_lossy(&stderr).trim()
         ))
     }
+}
+
+/// Read `pipe` to EOF on its own thread. `None` when no thread could
+/// be started; the pipe is then closed, so the child cannot block on it.
+fn drain(mut pipe: impl Read + Send + 'static) -> Option<JoinHandle<Vec<u8>>> {
+    std::thread::Builder::new()
+        .spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+        .ok()
+}
+
+/// What a [`drain`] thread read, or nothing if it never ran.
+fn collect(reader: Option<JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
 }
 
 /// The last line of a diff stat, or `None` when nothing changed.
@@ -464,6 +482,17 @@ mod tests {
         let err = Worktree::create(plain.path(), dir.path(), SessionId::new(), String::new())
             .unwrap_err();
         assert_eq!(err, "worktree isolation needs a git or jj repository");
+    }
+
+    /// A cleanup command that writes more than a pipe holds still
+    /// finishes instead of blocking until the bounded kill.
+    #[cfg(unix)]
+    #[test]
+    fn a_chatty_cleanup_command_is_not_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "head -c 200000 /dev/zero | tr '\\0' a; head -c 200000 /dev/zero >&2";
+        let out = run_bounded(dir.path(), "sh", &["-c", script]).unwrap();
+        assert_eq!(out.len(), 200_000);
     }
 
     /// A drop whose cleanup command hangs must return at once, and the
