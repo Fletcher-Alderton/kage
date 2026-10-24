@@ -66,11 +66,12 @@ impl Worktree {
         let path = dir.join(id.to_string());
         let target = path.to_string_lossy().into_owned();
         let made = |what: &str, err: String| format!("cannot make the worktree {what}: {err}");
-        if let Ok(root) = run(parent_workdir, "jj", &["root"]) {
+        if let Ok(root) = run(parent_workdir, "jj", &["root"], COMMAND_TIMEOUT) {
             std::fs::create_dir_all(dir).map_err(|err| made("directory", err.to_string()))?;
             let workspace = format!("kage-{short}");
             let args = ["workspace", "add", "--name", &workspace, "-r", "@", &target];
-            run(parent_workdir, "jj", &args).map_err(|err| made("workspace", err))?;
+            run(parent_workdir, "jj", &args, COMMAND_TIMEOUT)
+                .map_err(|err| made("workspace", err))?;
             let repo = PathBuf::from(root);
             return Ok(Self {
                 workdir: inside(&path, &repo, parent_workdir),
@@ -80,14 +81,19 @@ impl Worktree {
                 vcs: Vcs::Jj { workspace },
             });
         }
-        if let Ok(root) = run(parent_workdir, "git", &["rev-parse", "--show-toplevel"]) {
+        if let Ok(root) = run(
+            parent_workdir,
+            "git",
+            &["rev-parse", "--show-toplevel"],
+            COMMAND_TIMEOUT,
+        ) {
             std::fs::create_dir_all(dir).map_err(|err| made("directory", err.to_string()))?;
             let repo = PathBuf::from(root);
-            let base =
-                run(&repo, "git", &["rev-parse", "HEAD"]).map_err(|err| made("base", err))?;
+            let base = run(&repo, "git", &["rev-parse", "HEAD"], COMMAND_TIMEOUT)
+                .map_err(|err| made("base", err))?;
             let branch = format!("kage/agent-{short}");
             let args = ["worktree", "add", "-b", &branch, &target, "HEAD"];
-            run(&repo, "git", &args).map_err(|err| made("checkout", err))?;
+            run(&repo, "git", &args, COMMAND_TIMEOUT).map_err(|err| made("checkout", err))?;
             return Ok(Self {
                 workdir: inside(&path, &repo, parent_workdir),
                 path,
@@ -111,8 +117,14 @@ impl Worktree {
         match &self.vcs {
             Vcs::Jj { workspace } => {
                 let template = ["log", "-r", "@", "--no-graph", "-T", "change_id.short()"];
-                let read = run(&self.path, "jj", &template).and_then(|change| {
-                    run(&self.path, "jj", &["diff", "--stat", "-r", "@"]).map(|stat| (change, stat))
+                let read = run(&self.path, "jj", &template, COMMAND_TIMEOUT).and_then(|change| {
+                    run(
+                        &self.path,
+                        "jj",
+                        &["diff", "--stat", "-r", "@"],
+                        COMMAND_TIMEOUT,
+                    )
+                    .map(|stat| (change, stat))
                 });
                 match read {
                     Ok((change, stat)) => match summary(&stat) {
@@ -126,21 +138,33 @@ impl Worktree {
                 }
             }
             Vcs::Git { branch, base } => {
-                let committed = run(&self.path, "git", &["status", "--porcelain"])
-                    .and_then(|status| {
-                        if status.is_empty() {
-                            return Ok(());
-                        }
-                        run(&self.path, "git", &["add", "-A"])?;
-                        run(&self.path, "git", &["commit", "-q", "-m", &self.label]).map(|_| ())
-                    })
-                    .and_then(|()| {
-                        run(
-                            &self.path,
-                            "git",
-                            &["diff", "--stat", &format!("{base}..HEAD")],
-                        )
-                    });
+                let committed = run(
+                    &self.path,
+                    "git",
+                    &["status", "--porcelain"],
+                    COMMAND_TIMEOUT,
+                )
+                .and_then(|status| {
+                    if status.is_empty() {
+                        return Ok(());
+                    }
+                    run(&self.path, "git", &["add", "-A"], COMMAND_TIMEOUT)?;
+                    run(
+                        &self.path,
+                        "git",
+                        &["commit", "-q", "-m", &self.label],
+                        COMMAND_TIMEOUT,
+                    )
+                    .map(|_| ())
+                })
+                .and_then(|()| {
+                    run(
+                        &self.path,
+                        "git",
+                        &["diff", "--stat", &format!("{base}..HEAD")],
+                        COMMAND_TIMEOUT,
+                    )
+                });
                 match committed {
                     Ok(stat) => match summary(&stat) {
                         Some(stat) => format!(
@@ -161,6 +185,13 @@ impl Worktree {
         }
     }
 }
+
+/// How long one VCS command of [`Worktree::create`] or
+/// [`Worktree::checkpoint`] may run before it is killed: long enough
+/// for a slow pre-commit hook or a large `git add -A`, but bounded so
+/// a stuck VCS cannot keep the parent from ever getting the agent's
+/// result.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long one drop-path VCS command may run before it is killed:
 /// generous for a real `git` or `jj` on a slow disk, but bounded so a
@@ -214,7 +245,14 @@ fn cleanup(path: &Path, repo: &Path, vcs: &Vcs) {
     let target = path.to_string_lossy().into_owned();
     match vcs {
         Vcs::Jj { workspace } => {
-            if run_bounded(repo, "jj", &["workspace", "forget", workspace]).is_ok() {
+            if run(
+                repo,
+                "jj",
+                &["workspace", "forget", workspace],
+                DROP_COMMAND_TIMEOUT,
+            )
+            .is_ok()
+            {
                 let _ = std::fs::remove_dir_all(path);
             }
         }
@@ -222,24 +260,37 @@ fn cleanup(path: &Path, repo: &Path, vcs: &Vcs) {
             // A dirty or staged checkout refuses the plain remove,
             // which the checkpoint could not clean up by committing;
             // the stale directory is not worth keeping either.
-            if run_bounded(repo, "git", &["worktree", "remove", &target]).is_err()
-                && run_bounded(repo, "git", &["worktree", "remove", "--force", &target]).is_err()
+            if run(
+                repo,
+                "git",
+                &["worktree", "remove", &target],
+                DROP_COMMAND_TIMEOUT,
+            )
+            .is_err()
+                && run(
+                    repo,
+                    "git",
+                    &["worktree", "remove", "--force", &target],
+                    DROP_COMMAND_TIMEOUT,
+                )
+                .is_err()
             {
                 return;
             }
-            let ahead = run_bounded(
+            let ahead = run(
                 repo,
                 "git",
                 &["rev-list", "--count", &format!("{base}..{branch}")],
+                DROP_COMMAND_TIMEOUT,
             );
             if ahead.as_deref() == Ok("0") {
-                let _ = run_bounded(repo, "git", &["branch", "-D", branch]);
+                let _ = run(repo, "git", &["branch", "-D", branch], DROP_COMMAND_TIMEOUT);
             }
         }
         #[cfg(test)]
         Vcs::Command { program, args } => {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            let _ = run_bounded(repo, program, &args);
+            let _ = run(repo, program, &args, DROP_COMMAND_TIMEOUT);
         }
     }
 }
@@ -259,28 +310,11 @@ fn wait_for_drops(timeout: Duration) -> bool {
 }
 
 /// The trimmed output of `program args` run in `dir`, or what it
-/// printed on failure.
-fn run(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
-    let mut command = Command::new(program);
-    command.args(args).current_dir(dir);
-    let output = reaper::output(&mut command).map_err(|err| format!("{program}: {err}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    } else {
-        Err(format!(
-            "{program} {}: {}",
-            args.first().unwrap_or(&""),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    }
-}
-
-/// Like [`run`], but the child is killed once it outlives
-/// [`DROP_COMMAND_TIMEOUT`], and a pipe still open after the child
-/// exits is drained for [`DRAIN_GRACE`] at most: a drop must never
-/// wait on a stuck VCS forever, not even on an orphaned grandchild
-/// holding a pipe open.
-fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, String> {
+/// printed on failure. The child is killed once it outlives `timeout`,
+/// and a pipe still open after the child exits is drained for
+/// [`DRAIN_GRACE`] at most: no caller may wait on a stuck VCS forever,
+/// not even on an orphaned grandchild holding a pipe open.
+fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
     let mut command = Command::new(program);
     command.args(args).current_dir(dir);
     let mut child = command
@@ -293,7 +327,7 @@ fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, Strin
     // otherwise block until the deadline and be killed.
     let stdout = child.stdout.take().and_then(Drain::start);
     let stderr = child.stderr.take().and_then(Drain::start);
-    let deadline = Instant::now() + DROP_COMMAND_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match reaper::try_wait(&mut child) {
             Ok(Some(status)) => break status,
@@ -304,7 +338,7 @@ fn run_bounded(dir: &Path, program: &str, args: &[&str]) -> Result<String, Strin
             let _ = child.kill();
             let _ = reaper::wait(&mut child);
             return Err(format!(
-                "{program} {}: killed after {DROP_COMMAND_TIMEOUT:?}",
+                "{program} {}: killed after {timeout:?}",
                 args.first().unwrap_or(&"")
             ));
         }
@@ -398,7 +432,7 @@ mod tests {
     }
 
     fn sh(dir: &Path, program: &str, args: &[&str]) -> String {
-        run(dir, program, args).unwrap_or_else(|err| panic!("{err}"))
+        run(dir, program, args, COMMAND_TIMEOUT).unwrap_or_else(|err| panic!("{err}"))
     }
 
     /// A git repository with one commit and a `sub` directory.
@@ -528,7 +562,7 @@ mod tests {
     fn a_chatty_cleanup_command_is_not_killed() {
         let dir = tempfile::tempdir().unwrap();
         let script = "head -c 200000 /dev/zero | tr '\\0' a; head -c 200000 /dev/zero >&2";
-        let out = run_bounded(dir.path(), "sh", &["-c", script]).unwrap();
+        let out = run(dir.path(), "sh", &["-c", script], DROP_COMMAND_TIMEOUT).unwrap();
         assert_eq!(out.len(), 200_000);
     }
 
@@ -540,11 +574,33 @@ mod tests {
     fn an_orphaned_grandchild_does_not_extend_the_wait() {
         let dir = tempfile::tempdir().unwrap();
         let started = Instant::now();
-        let out = run_bounded(dir.path(), "sh", &["-c", "printf ready; sleep 5 &"]).unwrap();
+        let out = run(
+            dir.path(),
+            "sh",
+            &["-c", "printf ready; sleep 5 &"],
+            DROP_COMMAND_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(out, "ready");
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "waited {:?} for a grandchild holding the pipe",
+            started.elapsed()
+        );
+    }
+
+    /// A hung create or checkpoint command is killed at its timeout and
+    /// reported, so the parent still gets the agent's result.
+    #[cfg(unix)]
+    #[test]
+    fn a_hanging_command_is_killed_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let err = run(dir.path(), "sleep", &["30"], Duration::from_millis(200)).unwrap_err();
+        assert!(err.contains("killed after"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "waited {:?} for a hung command",
             started.elapsed()
         );
     }
