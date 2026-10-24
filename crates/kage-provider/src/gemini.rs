@@ -275,15 +275,47 @@ fn tool_spec_to_gemini(spec: &ToolSpec) -> Value {
     })
 }
 
-/// Map a draft-2020-12 JSON Schema (what `schemars` emits) into the
-/// `OpenAPI` subset Gemini's `functionDeclarations.parameters` accepts:
-/// `$ref`s inlined from `$defs`, draft keys dropped, `type` arrays
-/// (how `Option<T>` fields arrive) turned into Gemini's `nullable`
-/// flag, and `uint*` formats renamed to the ones Gemini knows.
+/// Map a draft-2020-12 JSON Schema (what `schemars` emits, or what an
+/// MCP server ships) into the `OpenAPI` subset Gemini's
+/// `functionDeclarations.parameters` accepts: `$ref`s inlined from
+/// `$defs`, draft keys dropped, `type` arrays (how `Option<T>` fields
+/// arrive) turned into Gemini's `nullable` flag, `const` folded into
+/// the `enum` Gemini knows, `uint*` formats renamed to the ones Gemini
+/// knows, and any key outside Gemini's `Schema` field set dropped. The
+/// drop is the point: Gemini rejects the whole request over one
+/// unknown name, and a third-party MCP schema can carry anything.
 fn gemini_schema(schema: &Value) -> Value {
     let defs = schema.get("$defs").cloned().unwrap_or(Value::Null);
     convert_schema(schema, &defs, 0)
 }
+
+/// Gemini `Schema` fields besides `type`, `format`, `const` and the
+/// draft keys, which [`convert_schema`] handles specially. Keys not on
+/// this list are dropped.
+const GEMINI_SCHEMA_KEYS: &[&str] = &[
+    "title",
+    "description",
+    "nullable",
+    "enum",
+    "items",
+    "minItems",
+    "maxItems",
+    "required",
+    "minProperties",
+    "maxProperties",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "minimum",
+    "maximum",
+    "anyOf",
+    "oneOf",
+    "propertyOrdering",
+];
+
+/// Gemini `Schema` fields whose value is arbitrary JSON rather than a
+/// schema; kept verbatim instead of converted.
+const VERBATIM_KEYS: &[&str] = &["default", "example"];
 
 fn convert_schema(value: &Value, defs: &Value, depth: usize) -> Value {
     // Cycle guard: schemars output for plain structs is acyclic, but a
@@ -303,7 +335,10 @@ fn convert_schema(value: &Value, defs: &Value, depth: usize) -> Value {
             let mut out = serde_json::Map::new();
             for (key, val) in map {
                 match key.as_str() {
-                    "$schema" | "$ref" | "$defs" => {}
+                    // Draft tooling keys, and the map-value schema
+                    // Gemini has no analogue for: dropped rather than
+                    // failing the request.
+                    "$schema" | "$id" | "$comment" | "$ref" | "$defs" | "additionalProperties" => {}
                     "type" => match val {
                         Value::String(t) => {
                             out.insert("type".to_owned(), Value::String(t.clone()));
@@ -332,9 +367,57 @@ fn convert_schema(value: &Value, defs: &Value, depth: usize) -> Value {
                         };
                         out.insert("format".to_owned(), Value::String(mapped.to_owned()));
                     }
-                    _ => {
-                        out.insert(key.clone(), convert_schema(val, defs, depth + 1));
+                    // A fixed value is Gemini's one-element `enum`,
+                    // which only takes strings.
+                    "const" => {
+                        if let Some(text) = val.as_str() {
+                            out.insert("enum".to_owned(), serde_json::json!([text]));
+                        }
                     }
+                    // Gemini's `enum` is an array of strings; a numeric
+                    // or mixed one would fail the request the same way
+                    // an unknown key would.
+                    "enum" => {
+                        let strings: Vec<String> = val
+                            .as_array()
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(|v| v.as_str())
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !strings.is_empty() {
+                            out.insert(
+                                "enum".to_owned(),
+                                Value::Array(strings.into_iter().map(Value::String).collect()),
+                            );
+                        }
+                    }
+                    // A map of property name to schema: the names are
+                    // property names, not schema keys, so each value is
+                    // converted on its own.
+                    "properties" => {
+                        if let Value::Object(props) = val {
+                            let converted = props
+                                .iter()
+                                .map(|(name, schema)| {
+                                    (name.clone(), convert_schema(schema, defs, depth + 1))
+                                })
+                                .collect();
+                            out.insert("properties".to_owned(), Value::Object(converted));
+                        }
+                    }
+                    key if VERBATIM_KEYS.contains(&key) => {
+                        out.insert(key.to_owned(), val.clone());
+                    }
+                    key if GEMINI_SCHEMA_KEYS.contains(&key) => {
+                        out.insert(key.to_owned(), convert_schema(val, defs, depth + 1));
+                    }
+                    // Anything else is no Gemini field; dropped so one
+                    // unknown name cannot reject the whole request.
+                    _ => {}
                 }
             }
             Value::Object(out)
@@ -847,6 +930,128 @@ mod tests {
         let start = &changes["items"]["properties"]["start"];
         assert_eq!(start["format"], "int32");
         assert_eq!(params["properties"]["path"]["type"], "string");
+    }
+
+    /// `todo_list`'s derived schema carries a `oneOf` of `const`
+    /// variants (how schemars 1 renders a unit enum). Gemini knows
+    /// `oneOf` but not `const`; each variant becomes a one-element
+    /// `enum`, the shape Gemini documents for fixed values.
+    #[test]
+    fn const_variants_become_one_element_enums() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "status": {
+                                "oneOf": [
+                                    {"type": "string", "const": "pending"},
+                                    {"type": "string", "const": "in_progress"},
+                                    {"type": "string", "const": "done"}
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
+        req.tools = vec![ToolSpec {
+            name: "todo_list".into(),
+            description: "the list".into(),
+            schema,
+        }];
+        let body = build_request_body(&req);
+        let text = body.to_string();
+        assert!(!text.contains("const"), "{text}");
+        assert!(!text.contains("additionalProperties"), "{text}");
+        let status = &body["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]["todos"]
+            ["items"]["properties"]["status"];
+        assert_eq!(
+            status["oneOf"],
+            serde_json::json!([
+                {"type": "string", "enum": ["pending"]},
+                {"type": "string", "enum": ["in_progress"]},
+                {"type": "string", "enum": ["done"]}
+            ])
+        );
+    }
+
+    /// Keys outside Gemini's `Schema` field set are dropped rather
+    /// than sent, because Gemini rejects the whole request over one
+    /// unknown name. A non-string `const` or `enum` goes too: Gemini's
+    /// `enum` is an array of strings only.
+    #[test]
+    fn keys_gemini_does_not_know_are_dropped() {
+        let schema = serde_json::json!({
+            "$comment": "internal",
+            "$id": "https://example.com/x",
+            "type": "object",
+            "additionalProperties": false,
+            "allOf": [{"type": "object"}],
+            "properties": {
+                "table": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"}
+                },
+                "count": {"type": "integer", "const": 3, "exclusiveMinimum": 0},
+                "mode": {"enum": [1, 2]}
+            }
+        });
+        let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
+        req.tools = vec![ToolSpec {
+            name: "mcp".into(),
+            description: "a third-party tool".into(),
+            schema,
+        }];
+        let body = build_request_body(&req);
+        let params = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let text = params.to_string();
+        for unknown in [
+            "$comment",
+            "$id",
+            "additionalProperties",
+            "const",
+            "exclusiveMinimum",
+            "allOf",
+        ] {
+            assert!(!text.contains(unknown), "{unknown} survived: {text}");
+        }
+        assert_eq!(params["properties"]["count"]["type"], "integer");
+        assert!(params["properties"]["count"].get("enum").is_none());
+        assert!(params["properties"]["mode"].get("enum").is_none());
+    }
+
+    /// `default` and `example` carry values, not schemas; they pass
+    /// through untouched instead of being converted.
+    #[test]
+    fn value_positions_pass_through_unconverted() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "flag": {
+                    "type": "boolean",
+                    "default": false,
+                    "example": {"const": "kept as a value"}
+                }
+            }
+        });
+        let mut req = StreamRequest::new("m", vec![Arc::new(user_msg("hi"))]);
+        req.tools = vec![ToolSpec {
+            name: "probe".into(),
+            description: "probe".into(),
+            schema,
+        }];
+        let body = build_request_body(&req);
+        let flag = &body["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]["flag"];
+        assert_eq!(flag["default"], false);
+        assert_eq!(
+            flag["example"],
+            serde_json::json!({"const": "kept as a value"})
+        );
     }
 
     #[test]
