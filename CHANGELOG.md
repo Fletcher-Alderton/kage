@@ -1,4 +1,30 @@
 # Changelog
+## [0.5.1](https://github.com/QaidVoid/kage/compare/v0.5.0...v0.5.1) - 2026-10-24
+
+### Features
+
+- *(provider)* Fetch the pictures an image gateway links - ([cce8b9a](https://github.com/QaidVoid/kage/commit/cce8b9a6dca48089fda964b8a6e6ce9790ed0ffd))
+- *(rpc)* Read the system prompt from a file too - ([9154e94](https://github.com/QaidVoid/kage/commit/9154e9451cef5899d290c05d7cf889b42de31f14))
+
+### Bug Fixes
+
+- *(cli)* Handle stopped worktree commands without losing work - ([1dbdc4a](https://github.com/QaidVoid/kage/commit/1dbdc4a35dcc8b48485e7930724f2952f8c75721))
+- *(cli)* Make worktree checkouts off the engine thread - ([858fba0](https://github.com/QaidVoid/kage/commit/858fba0e304b73ed7bc0c962abf076593628a824))
+- *(cli)* Stop timed-out VCS commands by process group - ([d2965e0](https://github.com/QaidVoid/kage/commit/d2965e08399472e6489c9936ee292f41203e363f))
+- *(cli)* Bound worktree create and checkpoint commands - ([a9ff2f7](https://github.com/QaidVoid/kage/commit/a9ff2f76caa30010439f85965c2ac7a9869b0e0e))
+- *(cli)* Bound the drop-path pipe drain by the deadline - ([e91f103](https://github.com/QaidVoid/kage/commit/e91f103067582717a288c30e96a06d200ac59f1a))
+- *(cli)* Drain cleanup command pipes while waiting - ([421dc0b](https://github.com/QaidVoid/kage/commit/421dc0b00cdd809a41fa248a3ac884ac8eb00966))
+- *(provider)* Retry gemini internal and deadline stream errors - ([4af5011](https://github.com/QaidVoid/kage/commit/4af50117879961427ae3c316e8afb9bb06c8a9c9))
+- *(provider)* Drop schema keys Gemini's declarations reject - ([1ffb23e](https://github.com/QaidVoid/kage/commit/1ffb23e857129a0d3564ae80050a7a9a50f864e1))
+
+### Refactor
+
+- *(core)* Remove unused reaper::output - ([981aa48](https://github.com/QaidVoid/kage/commit/981aa48f70381c416c7c93e57d8e59e410348f9e))
+
+### Testing
+
+- *(tools)* Read the whole request in generate_image's test server - ([52a2c39](https://github.com/QaidVoid/kage/commit/52a2c39884a5545d47fc94c703a661eb8d87a04a))
+
 ## [0.5.0](https://github.com/QaidVoid/kage/compare/v0.4.0...v0.5.0) - 2026-10-21
 
 ### Features
