@@ -6365,24 +6365,18 @@ fn rev_parse_in(dir: &std::path::Path) -> Vec<u32> {
         .collect()
 }
 
-/// A checkout that hangs runs off the engine thread: other inputs are
-/// still served meanwhile, and cancelling the parent stops the hung
-/// VCS command without opening the child.
+/// A git repository whose `git rev-parse` hangs: its config includes
+/// a FIFO nobody writes, so a checkout blocks before it writes anything.
+/// `None` without git.
 #[cfg(target_os = "linux")]
-#[test]
-fn a_hung_worktree_checkout_does_not_stall_the_engine() {
-    if std::process::Command::new("git")
+fn hung_git_repo() -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+    std::process::Command::new("git")
         .arg("--version")
         .output()
-        .is_err()
-    {
-        return;
-    }
-    // `git rev-parse` blocks opening the config include, a FIFO nobody
-    // writes, before the checkout writes anything.
+        .ok()?;
     let repo = tempfile::tempdir().unwrap();
-    let repo_path = repo.path().canonicalize().unwrap();
-    let fifo = repo_path.join("hang");
+    let path = repo.path().canonicalize().unwrap();
+    let fifo = path.join("hang");
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
     for args in [
         &["init", "-q"][..],
@@ -6390,36 +6384,63 @@ fn a_hung_worktree_checkout_does_not_stall_the_engine() {
     ] {
         let status = std::process::Command::new("git")
             .args(args)
-            .current_dir(&repo_path)
+            .current_dir(&path)
             .status()
             .unwrap();
         assert!(status.success());
     }
+    Some((repo, path))
+}
 
-    let h = harness(MockProvider::sequence(vec![agent_turn(&[(
-        "call_a",
-        task("work"),
-    )])]));
+/// The parent spec for a session in `workdir` whose `general` agent
+/// asks for a worktree.
+#[cfg(target_os = "linux")]
+fn worktree_parent(h: &Harness, id: SessionId, workdir: &std::path::Path) -> SessionSpec {
     let mut defs = AgentDefs::builtin();
     let mut def = defs.get("general").unwrap().clone();
     def.isolation = Isolation::Worktree;
     defs.insert(def);
-    let parent = SessionId::new();
-    h.engine.open(SessionSpec {
-        cx: AgentContext::new("m", "").with_workdir(repo_path.clone()),
+    SessionSpec {
+        cx: AgentContext::new("m", "").with_workdir(workdir.to_path_buf()),
         agents: Some(AgentSetup {
             defs: Arc::new(defs),
             ..agent_setup(1, 1)
         }),
-        ..h.spec(parent)
-    });
-    prompt(&h.engine, parent, "go", Delivery::Steer);
+        ..h.spec(id)
+    }
+}
 
+/// Wait until a `git rev-parse` runs in `repo` (`running`), or until
+/// none does.
+#[cfg(target_os = "linux")]
+fn wait_for_rev_parse(repo: &std::path::Path, running: bool) {
     let deadline = Instant::now() + WAIT;
-    while rev_parse_in(&repo_path).is_empty() {
-        assert!(Instant::now() < deadline, "the checkout never started");
+    while rev_parse_in(repo).is_empty() == running {
+        assert!(
+            Instant::now() < deadline,
+            "rev-parse running is not {running}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// A checkout that hangs runs off the engine thread: other inputs are
+/// still served meanwhile, and cancelling the parent stops the hung
+/// VCS command without opening the child.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_hung_worktree_checkout_does_not_stall_the_engine() {
+    let Some((_repo, repo_path)) = hung_git_repo() else {
+        return;
+    };
+    let h = harness(MockProvider::sequence(vec![agent_turn(&[(
+        "call_a",
+        task("work"),
+    )])]));
+    let parent = SessionId::new();
+    h.engine.open(worktree_parent(&h, parent, &repo_path));
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    wait_for_rev_parse(&repo_path, true);
     let (reply, answer) = crossbeam_channel::bounded(1);
     h.engine
         .commander()
@@ -6434,14 +6455,7 @@ fn a_hung_worktree_checkout_does_not_stall_the_engine() {
     h.engine.send(Command::to(parent, CommandKind::Cancel));
     let events = until_runs_end(&h.events, 1);
     assert_eq!(outcomes(&events), [RunOutcome::Cancelled]);
-    let deadline = Instant::now() + WAIT;
-    while !rev_parse_in(&repo_path).is_empty() {
-        assert!(
-            Instant::now() < deadline,
-            "the hung checkout was not stopped"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_rev_parse(&repo_path, false);
     let (reply, answer) = crossbeam_channel::bounded(1);
     h.engine
         .commander()
@@ -6450,5 +6464,55 @@ fn a_hung_worktree_checkout_does_not_stall_the_engine() {
         .unwrap();
     assert_eq!(answer.recv_timeout(WAIT).unwrap().len(), 1);
     assert!(spawned(&events).is_empty());
+    h.engine.shutdown();
+}
+
+/// A cancel sent to a child that is still waiting on its worktree, as
+/// a swarm sends to the children that never reported, stops the
+/// checkout and refuses the child.
+#[cfg(target_os = "linux")]
+#[test]
+fn cancelling_a_child_in_checkout_stops_the_checkout() {
+    let Some((_repo, repo_path)) = hung_git_repo() else {
+        return;
+    };
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let parent = SessionId::new();
+    h.engine.open(worktree_parent(&h, parent, &repo_path));
+    let child = SessionId::new();
+    let (reply, answer) = crossbeam_channel::bounded(1);
+    let spawn = Spawn {
+        parent,
+        tool_call_id: ToolCallId::new("call_s"),
+        agent: "general".to_owned(),
+        description: "a task".to_owned(),
+        prompt: "work".to_owned(),
+        reply,
+        fork: false,
+        swarm: Some(SwarmInfo {
+            id: child,
+            batch_id: ToolCallId::new("swarm_batch"),
+            index: 0,
+            item: "a".to_owned(),
+            total: 1,
+        }),
+        model: None,
+        thinking: None,
+        background: false,
+    };
+    h.engine
+        .commander()
+        .0
+        .send(Input::Spawn(Box::new(spawn)))
+        .unwrap();
+    wait_for_rev_parse(&repo_path, true);
+
+    h.engine.send(Command::to(child, CommandKind::Cancel));
+    let refused = answer.recv_timeout(WAIT).unwrap();
+    assert!(refused.is_error);
+    assert!(refused.text.contains("cancelled"), "{}", refused.text);
+    wait_for_rev_parse(&repo_path, false);
+    let hosted = h.engine.hosted_sessions();
+    assert!(!hosted.iter().any(|(id, _)| *id == child), "{hosted:?}");
     h.engine.shutdown();
 }

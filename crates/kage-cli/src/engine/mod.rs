@@ -357,6 +357,7 @@ impl Engine {
             swarm_requeues: HashMap::new(),
             fork_snapshot: None,
             forks_handled: HashMap::new(),
+            checkouts: HashMap::new(),
             closed,
         };
         let thread = thread::spawn(move || dispatcher.run(&rx));
@@ -586,6 +587,10 @@ struct Dispatcher {
     /// the engine has handled. Releases [`Self::fork_snapshot`] once
     /// all are.
     forks_handled: HashMap<ToolCallId, usize>,
+    /// Children whose worktree is being made, by the id they will get,
+    /// with the flag that stops the checkout: a cancel sent to a child
+    /// before it exists reaches its checkout.
+    checkouts: HashMap<SessionId, CancelFlag>,
     /// Reports every session the dispatcher removed, so the host can
     /// prune the bookkeeping of sessions it will never host again.
     closed: crossbeam_channel::Sender<SessionId>,
@@ -824,6 +829,11 @@ impl Dispatcher {
             return;
         };
         if !self.sessions.contains_key(&id) {
+            // A child still waiting on its worktree has no session yet.
+            if let (CommandKind::Cancel, Some(cancel)) = (&command.kind, self.checkouts.get(&id)) {
+                cancel.cancel();
+                return;
+            }
             notice(
                 &self.bus,
                 id,

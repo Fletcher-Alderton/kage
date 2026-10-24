@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::permissions::PermissionGate;
@@ -116,13 +116,22 @@ impl super::Dispatcher {
         }
     }
 
-    /// Continue a spawn whose worktree is made, or failed to be.
+    /// Continue a spawn whose worktree is made, or failed to be. A
+    /// checkout cancelled after it finished is refused all the same, and
+    /// dropping it removes it.
     pub(super) fn checked_out(&mut self, done: CheckedOut) {
         let CheckedOut {
             spawn,
             id,
-            worktree,
+            mut worktree,
         } = done;
+        let cancelled = self
+            .checkouts
+            .remove(&id)
+            .is_some_and(|cancel| cancel.is_cancelled());
+        if cancelled && worktree.is_ok() {
+            worktree = Err("cannot make the worktree: cancelled".to_owned());
+        }
         self.spawn_with(spawn, Some((id, worktree)));
     }
 
@@ -141,8 +150,9 @@ impl super::Dispatcher {
 
     /// Make the worktree for `spawn` on a thread of its own and hand the
     /// spawn back as [`Input::CheckedOut`](super::Input::CheckedOut).
-    /// Cancelling the parent's run stops the checkout.
-    fn check_out(&self, spawn: Spawn) {
+    /// Cancelling the parent's run, or the child's id before the child
+    /// exists, stops the checkout.
+    fn check_out(&mut self, spawn: Spawn) {
         let from = &self.sessions[&spawn.parent];
         let id = spawn
             .swarm
@@ -152,17 +162,32 @@ impl super::Dispatcher {
         let cancel = from.cancel.child();
         let label = format!("{}: {}", spawn.agent, spawn.description);
         let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let worktree = crate::paths::state_root().and_then(|root| {
-                Worktree::create(&parent_workdir, &root.join("worktrees"), id, label, &cancel)
+        // Shared so the spawn can be taken back when no thread starts.
+        let slot = Arc::new(Mutex::new(Some(spawn)));
+        let pending = Arc::clone(&slot);
+        let flag = cancel.clone();
+        let started = std::thread::Builder::new()
+            .name("kage-worktree-create".to_owned())
+            .spawn(move || {
+                let worktree = crate::paths::state_root().and_then(|root| {
+                    Worktree::create(&parent_workdir, &root.join("worktrees"), id, label, &flag)
+                });
+                let Some(spawn) = lock(&pending).take() else {
+                    return;
+                };
+                let done = CheckedOut {
+                    spawn,
+                    id,
+                    worktree,
+                };
+                let _ = tx.send(super::Input::CheckedOut(Box::new(done)));
             });
-            let done = CheckedOut {
-                spawn,
-                id,
-                worktree,
-            };
-            let _ = tx.send(super::Input::CheckedOut(Box::new(done)));
-        });
+        if started.is_ok() {
+            self.checkouts.insert(id, cancel);
+        } else if let Some(spawn) = lock(&slot).take() {
+            let failed = Err("cannot make the worktree: no thread to run it on".to_owned());
+            self.spawn_with(spawn, Some((id, failed)));
+        }
     }
 
     /// Spawn the child, then count it as handled when a forking swarm

@@ -5,10 +5,11 @@
 //! dropped. Nothing is merged: the agent's report says where its work
 //! is and how to take it.
 
+use std::fmt::{self, Display};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -32,6 +33,9 @@ pub(super) struct Worktree {
     /// The git commit message: the agent and its task.
     label: String,
     vcs: Vcs,
+    /// Set when the last checkpoint's command was stopped: the work may
+    /// be uncommitted, so the drop leaves the checkout in place.
+    keep: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -70,41 +74,54 @@ impl Worktree {
         let short = short(id);
         let path = dir.join(id.to_string());
         let target = path.to_string_lossy().into_owned();
-        let made = |what: &str, err: String| format!("cannot make the worktree {what}: {err}");
+        let made =
+            |what: &str, err: &dyn Display| format!("cannot make the worktree {what}: {err}");
+        // A stopped add may have left part of the checkout behind. A
+        // failed one is undone by the VCS itself, and may have failed
+        // on something that is not ours, like a branch of that name.
+        let added = |what: &str, result: Result<String, RunError>, repo: &Path, vcs: &Vcs| {
+            if let Err(RunError::Stopped(_)) = &result {
+                undo(&path, repo, vcs);
+            }
+            result.map_err(|err| made(what, &err))
+        };
         if let Ok(root) = run(parent_workdir, "jj", &["root"]) {
-            std::fs::create_dir_all(dir).map_err(|err| made("directory", err.to_string()))?;
+            std::fs::create_dir_all(dir).map_err(|err| made("directory", &err))?;
+            let repo = PathBuf::from(root);
             let workspace = format!("kage-{short}");
             let args = ["workspace", "add", "--name", &workspace, "-r", "@", &target];
-            run(parent_workdir, "jj", &args).map_err(|err| made("workspace", err))?;
-            let repo = PathBuf::from(root);
-            return Ok(Self {
-                workdir: inside(&path, &repo, parent_workdir),
-                path,
-                repo,
-                label,
-                vcs: Vcs::Jj { workspace },
-            });
+            let result = run(parent_workdir, "jj", &args);
+            let vcs = Vcs::Jj { workspace };
+            added("workspace", result, &repo, &vcs)?;
+            return Ok(Self::new(path, &repo, parent_workdir, label, vcs));
         }
         if let Ok(root) = run(parent_workdir, "git", &["rev-parse", "--show-toplevel"]) {
-            std::fs::create_dir_all(dir).map_err(|err| made("directory", err.to_string()))?;
+            std::fs::create_dir_all(dir).map_err(|err| made("directory", &err))?;
             let repo = PathBuf::from(root);
             let base =
-                run(&repo, "git", &["rev-parse", "HEAD"]).map_err(|err| made("base", err))?;
+                run(&repo, "git", &["rev-parse", "HEAD"]).map_err(|err| made("base", &err))?;
             let branch = format!("kage/agent-{short}");
             let args = ["worktree", "add", "-b", &branch, &target, "HEAD"];
-            run(&repo, "git", &args).map_err(|err| made("checkout", err))?;
-            return Ok(Self {
-                workdir: inside(&path, &repo, parent_workdir),
-                path,
-                repo,
-                label,
-                vcs: Vcs::Git { branch, base },
-            });
+            let result = run(&repo, "git", &args);
+            let vcs = Vcs::Git { branch, base };
+            added("checkout", result, &repo, &vcs)?;
+            return Ok(Self::new(path, &repo, parent_workdir, label, vcs));
         }
         if cancel.is_cancelled() {
             return Err("cannot make the worktree: cancelled".to_owned());
         }
         Err("worktree isolation needs a git or jj repository".to_owned())
+    }
+
+    fn new(path: PathBuf, repo: &Path, parent_workdir: &Path, label: String, vcs: Vcs) -> Self {
+        Self {
+            workdir: inside(&path, repo, parent_workdir),
+            path,
+            repo: repo.to_path_buf(),
+            label,
+            vcs,
+            keep: AtomicBool::new(false),
+        }
     }
 
     /// Where the agent works.
@@ -128,6 +145,7 @@ impl Worktree {
                     )
                     .map(|stat| (change, stat))
                 });
+                let kept = self.keep_if_stopped(&read);
                 match read {
                     Ok((change, stat)) => match summary(&stat) {
                         Some(stat) => format!(
@@ -136,7 +154,9 @@ impl Worktree {
                         ),
                         None => format!("Worktree: workspace {workspace} has no changes."),
                     },
-                    Err(err) => format!("Worktree: the checkout at {at} could not be read: {err}"),
+                    Err(err) => {
+                        format!("Worktree: the checkout at {at} could not be read: {err}{kept}")
+                    }
                 }
             }
             Vcs::Git { branch, base } => {
@@ -167,6 +187,7 @@ impl Worktree {
                         COMMAND_TIMEOUT,
                     )
                 });
+                let kept = self.keep_if_stopped(&committed);
                 match committed {
                     Ok(stat) => match summary(&stat) {
                         Some(stat) => format!(
@@ -176,7 +197,7 @@ impl Worktree {
                         None => format!("Worktree: branch {branch} has no changes."),
                     },
                     Err(err) => {
-                        format!("Worktree: the work at {at} could not be committed: {err}")
+                        format!("Worktree: the work at {at} could not be committed: {err}{kept}")
                     }
                 }
             }
@@ -184,6 +205,18 @@ impl Worktree {
             Vcs::Command { .. } => {
                 unreachable!("the test-only cleanup command has nothing to checkpoint")
             }
+        }
+    }
+
+    /// Keep the checkout on drop when `result` is a stopped command:
+    /// its work may be uncommitted. Returns the note the report adds.
+    fn keep_if_stopped<T>(&self, result: &Result<T, RunError>) -> &'static str {
+        let stopped = matches!(result, Err(RunError::Stopped(_)));
+        self.keep.store(stopped, Ordering::SeqCst);
+        if stopped {
+            "; the checkout is kept so the work is not lost"
+        } else {
+            ""
         }
     }
 }
@@ -196,8 +229,13 @@ const CREATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long one VCS command of [`Worktree::checkpoint`] may run before
 /// it is killed: long enough for a slow pre-commit hook or a large
 /// `git add -A`, but bounded so a stuck VCS cannot keep the parent from
-/// ever getting the agent's result.
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// ever getting the agent's result. Tests use a short one, so a hung
+/// checkpoint is quick to exercise.
+const COMMAND_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_secs(5)
+} else {
+    Duration::from_secs(60)
+};
 
 /// How long one drop-path VCS command may run before it is killed:
 /// generous for a real `git` or `jj` on a slow disk, but bounded so a
@@ -222,8 +260,12 @@ impl Drop for Worktree {
     /// Removes the checkout on a detached thread so a slow VCS never
     /// blocks the caller, with every command killed at
     /// [`DROP_COMMAND_TIMEOUT`]. Best-effort: when the process exits
-    /// before the thread finishes, the checkout is left behind.
+    /// before the thread finishes, the checkout is left behind. A
+    /// checkout whose last checkpoint was stopped is left on purpose.
     fn drop(&mut self) {
+        if self.keep.load(Ordering::SeqCst) {
+            return;
+        }
         let vcs = std::mem::replace(
             &mut self.vcs,
             Vcs::Jj {
@@ -287,21 +329,66 @@ fn cleanup(path: &Path, repo: &Path, vcs: &Vcs) {
             {
                 return;
             }
-            let ahead = run(
-                repo,
-                "git",
-                &["rev-list", "--count", &format!("{base}..{branch}")],
-                DROP_COMMAND_TIMEOUT,
-            );
-            if ahead.as_deref() == Ok("0") {
-                let _ = run(repo, "git", &["branch", "-D", branch], DROP_COMMAND_TIMEOUT);
-            }
+            drop_empty_branch(repo, branch, base);
         }
         #[cfg(test)]
         Vcs::Command { program, args } => {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let _ = run(repo, program, &args, DROP_COMMAND_TIMEOUT);
         }
+    }
+}
+
+/// Remove what a stopped [`Worktree::create`] may have made of the
+/// checkout at `path`: the workspace or worktree entry, the directory,
+/// and a git branch with no commits of its own.
+fn undo(path: &Path, repo: &Path, vcs: &Vcs) {
+    let target = path.to_string_lossy().into_owned();
+    match vcs {
+        Vcs::Jj { workspace } => {
+            let args = ["workspace", "forget", workspace.as_str()];
+            let _ = run(repo, "jj", &args, DROP_COMMAND_TIMEOUT);
+            let _ = std::fs::remove_dir_all(path);
+        }
+        Vcs::Git { branch, base } => {
+            let args = ["worktree", "remove", "--force", target.as_str()];
+            let _ = run(repo, "git", &args, DROP_COMMAND_TIMEOUT);
+            let _ = std::fs::remove_dir_all(path);
+            let _ = run(repo, "git", &["worktree", "prune"], DROP_COMMAND_TIMEOUT);
+            drop_empty_branch(repo, branch, base);
+        }
+        #[cfg(test)]
+        Vcs::Command { .. } => {}
+    }
+}
+
+/// Delete the agent's git `branch` when it holds no commits past `base`.
+fn drop_empty_branch(repo: &Path, branch: &str, base: &str) {
+    let range = format!("{base}..{branch}");
+    let ahead = run(
+        repo,
+        "git",
+        &["rev-list", "--count", &range],
+        DROP_COMMAND_TIMEOUT,
+    );
+    if matches!(ahead.as_deref(), Ok("0")) {
+        let _ = run(repo, "git", &["branch", "-D", branch], DROP_COMMAND_TIMEOUT);
+    }
+}
+
+/// Why [`run`] has no output for the caller.
+#[derive(Debug)]
+enum RunError {
+    /// The command could not start, or ran and failed.
+    Failed(String),
+    /// The command was stopped by its timeout or a cancel.
+    Stopped(String),
+}
+
+impl Display for RunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (Self::Failed(text) | Self::Stopped(text)) = self;
+        f.write_str(text)
     }
 }
 
@@ -324,7 +411,7 @@ fn wait_for_drops(timeout: Duration) -> bool {
 /// and a pipe still open after the child exits is drained for
 /// [`DRAIN_GRACE`] at most: no caller may wait on a stuck VCS forever,
 /// not even on an orphaned grandchild holding a pipe open.
-fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<String, RunError> {
     run_until(dir, program, args, timeout, None)
 }
 
@@ -336,14 +423,20 @@ fn run_until(
     args: &[&str],
     timeout: Duration,
     cancel: Option<&CancelFlag>,
-) -> Result<String, String> {
+) -> Result<String, RunError> {
     let mut command = Command::new(program);
-    command.args(args).current_dir(dir);
+    // No one can answer a prompt: fail it instead of waiting on it.
+    command
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Own process group, so a timeout also stops the hooks the VCS
-        // started.
+        // Own process group, so a stop also reaches the hooks the VCS
+        // started. The group is not the terminal's foreground one: a
+        // terminal Ctrl-C does not reach it, and a hook reading the
+        // terminal is stopped until the timeout.
         command.process_group(0);
     }
     let mut child = command
@@ -351,7 +444,7 @@ fn run_until(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| format!("{program}: {err}"))?;
+        .map_err(|err| RunError::Failed(format!("{program}: {err}")))?;
     // Drain both pipes while polling: a child that fills a pipe would
     // otherwise block until the deadline and be killed.
     let stdout = child.stdout.take().and_then(Drain::start);
@@ -361,21 +454,21 @@ fn run_until(
         match reaper::try_wait(&mut child) {
             Ok(Some(status)) => break status,
             Ok(None) => {}
-            Err(err) => return Err(format!("{program}: {err}")),
+            Err(err) => return Err(RunError::Failed(format!("{program}: {err}"))),
         }
         if Instant::now() >= deadline {
             stop(&mut child);
-            return Err(format!(
+            return Err(RunError::Stopped(format!(
                 "{program} {}: killed after {timeout:?}",
                 args.first().unwrap_or(&"")
-            ));
+            )));
         }
         if cancel.is_some_and(CancelFlag::is_cancelled) {
             stop(&mut child);
-            return Err(format!(
+            return Err(RunError::Stopped(format!(
                 "{program} {}: cancelled",
                 args.first().unwrap_or(&"")
-            ));
+            )));
         }
         std::thread::sleep(Duration::from_millis(25));
     };
@@ -385,17 +478,17 @@ fn run_until(
     if status.success() {
         Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
     } else {
-        Err(format!(
+        Err(RunError::Failed(format!(
             "{program} {}: {}",
             args.first().unwrap_or(&""),
             String::from_utf8_lossy(&stderr).trim()
-        ))
+        )))
     }
 }
 
-/// Stop a timed-out child and its process group: SIGTERM first, so
-/// git can remove its lock files, then SIGKILL after [`TERM_GRACE`]
-/// for whatever is left.
+/// Stop a child that timed out or was cancelled, with its process
+/// group: SIGTERM first, so git can remove its lock files, then SIGKILL
+/// after [`TERM_GRACE`] for whatever is left.
 fn stop(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -490,6 +583,19 @@ mod tests {
 
     fn sh(dir: &Path, program: &str, args: &[&str]) -> String {
         run(dir, program, args, COMMAND_TIMEOUT).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Install a `name` hook in `repo` that marks the returned file,
+    /// then hangs.
+    #[cfg(unix)]
+    fn hanging_hook(repo: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let started = repo.join(".git").join(format!("{name}-started"));
+        let hook = repo.join(".git/hooks").join(name);
+        let script = format!("#!/bin/sh\ntouch '{}'\nsleep 30\n", started.display());
+        std::fs::write(&hook, script).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        started
     }
 
     /// A git repository with one commit and a `sub` directory.
@@ -681,7 +787,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let started = Instant::now();
         let err = run(dir.path(), "sleep", &["30"], Duration::from_millis(200)).unwrap_err();
-        assert!(err.contains("killed after"), "{err}");
+        assert!(
+            matches!(&err, RunError::Stopped(text) if text.contains("killed after")),
+            "{err}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "waited {:?} for a hung command",
@@ -703,7 +812,10 @@ mod tests {
         });
         let err =
             run_until(dir.path(), "sleep", &["30"], COMMAND_TIMEOUT, Some(&cancel)).unwrap_err();
-        assert!(err.ends_with("cancelled"), "{err}");
+        assert!(
+            matches!(&err, RunError::Stopped(text) if text.ends_with("cancelled")),
+            "{err}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "waited {:?} for a cancelled command",
@@ -725,7 +837,10 @@ mod tests {
             Duration::from_millis(200),
         )
         .unwrap_err();
-        assert!(err.contains("killed after"), "{err}");
+        assert!(
+            matches!(&err, RunError::Stopped(text) if text.contains("killed after")),
+            "{err}"
+        );
         assert!(dir.path().join("terminated").exists());
     }
 
@@ -743,7 +858,10 @@ mod tests {
             Duration::from_millis(200),
         )
         .unwrap_err();
-        assert!(err.contains("killed after"), "{err}");
+        assert!(
+            matches!(&err, RunError::Stopped(text) if text.contains("killed after")),
+            "{err}"
+        );
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
         let stat = format!("/proc/{}/stat", pid.trim());
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -759,6 +877,76 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         };
         assert!(!alive, "the grandchild survived the timeout");
+    }
+
+    /// A create stopped while `git worktree add` runs undoes what it
+    /// made: no worktree entry, branch or directory is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_git_checkout_is_undone() {
+        if !has("git") {
+            return;
+        }
+        let repo = git_repo();
+        let started = hanging_hook(repo.path(), "post-checkout");
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let cancel = CancelFlag::new();
+        let stopper = cancel.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !started.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            stopper.cancel();
+        });
+        let err =
+            Worktree::create(repo.path(), dir.path(), id, String::new(), &cancel).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(!dir.path().join(id.to_string()).exists());
+        let branch = format!("kage/agent-{}", short(id));
+        assert_eq!(sh(repo.path(), "git", &["branch", "--list", &branch]), "");
+        let worktrees = sh(repo.path(), "git", &["worktree", "list"]);
+        assert_eq!(worktrees.lines().count(), 1, "{worktrees}");
+    }
+
+    /// A checkpoint whose commit is stopped keeps the checkout and its
+    /// branch on drop, so the uncommitted work is not deleted.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_checkpoint_keeps_the_checkout() {
+        if !has("git") {
+            return;
+        }
+        let repo = git_repo();
+        let dir = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let tree = Worktree::create(
+            repo.path(),
+            dir.path(),
+            id,
+            "general: add b".into(),
+            &CancelFlag::new(),
+        )
+        .unwrap();
+        hanging_hook(repo.path(), "pre-commit");
+        std::fs::write(tree.workdir().join("b.txt"), "b\n").unwrap();
+        let report = tree.checkpoint();
+        assert!(report.contains("killed after"), "{report}");
+        assert!(report.contains("is kept"), "{report}");
+        let path = tree.path.clone();
+        drop(tree);
+        assert!(wait_for_drops(Duration::from_secs(30)));
+        assert!(
+            path.join("b.txt").exists(),
+            "the uncommitted work was deleted"
+        );
+        let branch = format!("kage/agent-{}", short(id));
+        let listed = sh(repo.path(), "git", &["branch", "--list", &branch]);
+        assert!(
+            listed.contains(&branch),
+            "the branch was deleted: {listed:?}"
+        );
     }
 
     /// A drop whose cleanup command hangs must return at once, and the
@@ -777,6 +965,7 @@ mod tests {
                 program: "sleep".to_owned(),
                 args: vec!["30".to_owned()],
             },
+            keep: AtomicBool::new(false),
         };
         let start = Instant::now();
         drop(tree);
