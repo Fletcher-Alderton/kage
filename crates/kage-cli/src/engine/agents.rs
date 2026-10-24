@@ -94,10 +94,98 @@ impl AgentLink {
     }
 }
 
+/// A worktree made off the engine thread for a child about to spawn,
+/// handed back with the spawn that waits on it.
+pub(super) struct CheckedOut {
+    pub(super) spawn: Spawn,
+    /// The child's session id, which names its checkout.
+    pub(super) id: SessionId,
+    pub(super) worktree: Result<Worktree, String>,
+}
+
 impl super::Dispatcher {
     /// Open a child session for an `agent` call and start it, or queue it
-    /// when the running limit is reached. Errors reply at once.
+    /// when the running limit is reached. Errors reply at once. A child
+    /// whose definition asks for a worktree has it made on a thread of
+    /// its own first, so a slow checkout never stalls the engine.
     pub(super) fn spawn(&mut self, spawn: Spawn) {
+        if self.wants_worktree(&spawn) {
+            self.check_out(spawn);
+        } else {
+            self.spawn_with(spawn, None);
+        }
+    }
+
+    /// Continue a spawn whose worktree is made, or failed to be.
+    pub(super) fn checked_out(&mut self, done: CheckedOut) {
+        let CheckedOut {
+            spawn,
+            id,
+            worktree,
+        } = done;
+        self.spawn_with(spawn, Some((id, worktree)));
+    }
+
+    /// Whether `spawn` passes the spawn checks and its definition asks
+    /// for a worktree. A spawn that fails the checks is refused without
+    /// a checkout.
+    fn wants_worktree(&self, spawn: &Spawn) -> bool {
+        self.spawn_setup(spawn.parent, &spawn.agent)
+            .is_ok_and(|(setup, _)| {
+                setup
+                    .defs
+                    .get(&spawn.agent)
+                    .is_some_and(|def| def.isolation == Isolation::Worktree)
+            })
+    }
+
+    /// Make the worktree for `spawn` on a thread of its own and hand the
+    /// spawn back as [`Input::CheckedOut`](super::Input::CheckedOut).
+    /// Cancelling the parent's run stops the checkout.
+    fn check_out(&self, spawn: Spawn) {
+        let from = &self.sessions[&spawn.parent];
+        let id = spawn
+            .swarm
+            .as_ref()
+            .map_or_else(SessionId::new, |info| info.id);
+        let parent_workdir = from.workdir.clone();
+        let cancel = from.cancel.child();
+        let label = format!("{}: {}", spawn.agent, spawn.description);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let worktree = crate::paths::state_root().and_then(|root| {
+                Worktree::create(&parent_workdir, &root.join("worktrees"), id, label, &cancel)
+            });
+            let done = CheckedOut {
+                spawn,
+                id,
+                worktree,
+            };
+            let _ = tx.send(super::Input::CheckedOut(Box::new(done)));
+        });
+    }
+
+    /// Spawn the child, then count it as handled when a forking swarm
+    /// call started it. `checkout` is its id and worktree when one was
+    /// made.
+    fn spawn_with(
+        &mut self,
+        spawn: Spawn,
+        checkout: Option<(SessionId, Result<Worktree, String>)>,
+    ) {
+        let fork = spawn.fork;
+        let member = swarm_member_of(spawn.swarm.as_ref());
+        self.open_child(spawn, checkout);
+        if let Some((batch, total)) = member.filter(|_| fork) {
+            self.fork_handled(&batch, total);
+        }
+    }
+
+    fn open_child(
+        &mut self,
+        spawn: Spawn,
+        checkout: Option<(SessionId, Result<Worktree, String>)>,
+    ) {
         let Spawn {
             parent,
             tool_call_id,
@@ -135,11 +223,12 @@ impl super::Dispatcher {
 
         // A swarm call names its children up front so the tool can
         // cancel the ones that never reported.
+        let (made_id, made) = checkout.unzip();
         let (id, swarm) = match swarm {
             Some(info) => (info.id, Some(info)),
-            None => (SessionId::new(), None),
+            None => (made_id.unwrap_or_else(SessionId::new), None),
         };
-        let (worktree, workdir) = match child_workdir(from, &def, id, &description) {
+        let (worktree, workdir) = match child_workdir(from, made) {
             Ok(found) => found,
             Err(text) => return fail(text),
         };
@@ -150,13 +239,7 @@ impl super::Dispatcher {
             });
             match forked {
                 Ok((spec, missing, path)) => (spec, missing, Some(path)),
-                Err(text) => {
-                    // A failed child never runs, so once the batch is
-                    // done spawning the cached parent transcript has
-                    // no reader left.
-                    self.release_snapshot(swarm.as_ref());
-                    return fail(text);
-                }
+                Err(text) => return fail(text),
             }
         } else {
             let (spec, missing) = agent_spec(from, parent, id, &def, &setup, &workdir);
@@ -165,7 +248,6 @@ impl super::Dispatcher {
         spec.cx.confine_paths |= worktree.is_some();
         let background = background && depth == 1 && setup.background != Background::Off;
         let cancel = child_cancel(from, background);
-        self.release_snapshot(swarm.as_ref());
         let batch_id = swarm.as_ref().map(|info| info.batch_id.clone());
         let (report, started) = if background {
             (Report::Message, Some(reply))
@@ -206,10 +288,24 @@ impl super::Dispatcher {
         }
     }
 
-    /// Drop the parent conversation a forking swarm call copies once its
-    /// last child has spawned.
-    fn release_snapshot(&mut self, swarm: Option<&SwarmInfo>) {
-        if swarm.is_some_and(|info| info.index + 1 >= info.total) {
+    /// Count one forked child of the swarm call `batch` as handled,
+    /// spawned or refused, and drop the parent conversation the call's
+    /// forks copy once all `total` are. Counted rather than taken from
+    /// the child's index: children with a worktree spawn in whatever
+    /// order their checkouts finish. A forking call resumes no one, so
+    /// every member is a forked spawn.
+    fn fork_handled(&mut self, batch: &ToolCallId, total: usize) {
+        let handled = self.forks_handled.entry(batch.clone()).or_default();
+        *handled += 1;
+        if *handled < total {
+            return;
+        }
+        self.forks_handled.remove(batch);
+        if self
+            .fork_snapshot
+            .as_ref()
+            .is_some_and(|(cached, _)| cached == batch)
+        {
             self.fork_snapshot = None;
         }
     }
@@ -984,35 +1080,24 @@ fn agent_spec(
     )
 }
 
-/// A checkout of its own for the agent `id` of `from`, when its
-/// definition asks for one, under the state directory.
-fn checkout(
-    from: &Session,
-    def: &AgentDef,
-    id: SessionId,
-    description: &str,
-) -> Result<Option<Arc<Worktree>>, String> {
-    if def.isolation != Isolation::Worktree {
-        return Ok(None);
-    }
-    let dir = crate::paths::state_root()?.join("worktrees");
-    let label = format!("{}: {description}", def.name);
-    Worktree::create(&from.workdir, &dir, id, label).map(|w| Some(Arc::new(w)))
-}
-
-/// The worktree of the agent `id` of `from`, when its definition asks
-/// for one, and the directory the agent works in.
+/// The worktree a child got, if one was made for it, and the directory
+/// it works in: the checkout's, or else `from`'s.
 fn child_workdir(
     from: &Session,
-    def: &AgentDef,
-    id: SessionId,
-    description: &str,
+    made: Option<Result<Worktree, String>>,
 ) -> Result<(Option<Arc<Worktree>>, PathBuf), String> {
-    let worktree = checkout(from, def, id, description)?;
-    let workdir = worktree
-        .as_ref()
-        .map_or_else(|| from.workdir.clone(), |w| w.workdir().to_path_buf());
-    Ok((worktree, workdir))
+    match made.transpose()? {
+        Some(worktree) => {
+            let workdir = worktree.workdir().to_path_buf();
+            Ok((Some(Arc::new(worktree)), workdir))
+        }
+        None => Ok((None, from.workdir.clone())),
+    }
+}
+
+/// The swarm call a member belongs to and the call's member count.
+fn swarm_member_of(swarm: Option<&SwarmInfo>) -> Option<(ToolCallId, usize)> {
+    swarm.map(|info| (info.batch_id.clone(), info.total))
 }
 
 /// The `kage:agent` marker an agent's session file starts with.

@@ -60,7 +60,7 @@ pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
 
 use agent_tool::{AGENT_TOOL, AgentTool, Spawn};
-use agents::{AgentLink, SwarmResumed, depth_of};
+use agents::{AgentLink, CheckedOut, SwarmResumed, depth_of};
 use bus::Bus;
 use mailbox_tool::{MAILBOX_TOOL, MailboxTool};
 use mcp::{McpDone, restart_failed};
@@ -222,6 +222,9 @@ enum Input {
     Command(Command),
     Open(Box<SessionSpec>),
     Spawn(Box<Spawn>),
+    /// A worktree a spawn waited on is made, or failed to be. Sent by
+    /// the checkout thread, so the spawn continues on the engine.
+    CheckedOut(Box<CheckedOut>),
     /// Check that every id names a swarm child of `parent` before the
     /// caller attaches to any of them. Replies with each child's
     /// marker facts, or the reason the whole call is refused.
@@ -353,6 +356,7 @@ impl Engine {
             watchdogs: HashMap::new(),
             swarm_requeues: HashMap::new(),
             fork_snapshot: None,
+            forks_handled: HashMap::new(),
             closed,
         };
         let thread = thread::spawn(move || dispatcher.run(&rx));
@@ -575,9 +579,13 @@ struct Dispatcher {
     /// and when their shared timeout budget started.
     swarm_requeues: HashMap<SessionId, RequeueState>,
     /// The parent conversation a forking swarm call copies into each of
-    /// its children, read once per call and dropped after its last
-    /// child spawns.
+    /// its children, read once per call and dropped once every child
+    /// of the call is handled.
     fork_snapshot: Option<(ToolCallId, kage_session::Snapshot)>,
+    /// Per forking swarm call still spawning, how many of its children
+    /// the engine has handled. Releases [`Self::fork_snapshot`] once
+    /// all are.
+    forks_handled: HashMap<ToolCallId, usize>,
     /// Reports every session the dispatcher removed, so the host can
     /// prune the bookkeeping of sessions it will never host again.
     closed: crossbeam_channel::Sender<SessionId>,
@@ -590,6 +598,7 @@ impl Dispatcher {
                 Input::Command(command) => self.command(command),
                 Input::Open(spec) => self.open(*spec, CancelFlag::new(), None),
                 Input::Spawn(spawn) => self.spawn(*spawn),
+                Input::CheckedOut(done) => self.checked_out(*done),
                 Input::VerifyResume { parent, ids, reply } => {
                     let _ = reply.send(self.verify_resume(parent, &ids));
                 }

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use kage_core::Content;
 use kage_core::agent_report::{AgentLimit, AgentMail, AgentReport, ReportState};
-use kage_core::agents::AgentDefs;
+use kage_core::agents::{AgentDefs, Isolation};
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::{EXIT_PLAN_TOOL, Envelope, Event, RunOutcome};
 use kage_core::{LoopError, LoopEvent, StopReason, TokenUsage, ToolCallId, ToolOutput};
@@ -6214,5 +6214,241 @@ fn a_failed_fork_spawn_releases_the_snapshot_when_the_batch_is_done() {
     );
     let done = first.recv_timeout(WAIT).unwrap();
     assert!(done.text.contains("state=\"completed\""), "{}", done.text);
+    h.engine.shutdown();
+}
+
+#[test]
+fn fork_children_spawned_out_of_order_keep_the_snapshot_until_the_batch_is_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(4, 60_000)),
+        ..h.spec(parent)
+    });
+    let batch = ToolCallId::new("swarm_batch");
+    let spawn = |id: SessionId, index: usize, reply: crossbeam_channel::Sender<ToolOutput>| {
+        Input::Spawn(Box::new(Spawn {
+            parent,
+            tool_call_id: ToolCallId::new("call_s"),
+            agent: "general".to_owned(),
+            description: "a task".to_owned(),
+            prompt: "work".to_owned(),
+            reply,
+            fork: true,
+            swarm: Some(SwarmInfo {
+                id,
+                batch_id: batch.clone(),
+                index,
+                item: "a".to_owned(),
+                total: 3,
+            }),
+            model: None,
+            thinking: None,
+            background: false,
+        }))
+    };
+    let probe = |h: &Harness| {
+        let (reply, answer) = crossbeam_channel::bounded(1);
+        h.engine
+            .commander()
+            .0
+            .send(Input::ForkSnapshot(reply))
+            .unwrap();
+        answer.recv_timeout(WAIT).unwrap()
+    };
+    let refused = |h: &Harness, id: SessionId, index: usize| {
+        let (reply, answer) = crossbeam_channel::bounded(1);
+        h.engine
+            .commander()
+            .0
+            .send(spawn(id, index, reply))
+            .unwrap();
+        answer.recv_timeout(WAIT).unwrap()
+    };
+
+    // The last index arrives first, as when the children's worktrees
+    // finish out of order. Spawning its id again makes the later forks
+    // fail, which still counts them as handled.
+    let dup = SessionId::new();
+    let (first_reply, first) = crossbeam_channel::bounded(1);
+    h.engine
+        .commander()
+        .0
+        .send(spawn(dup, 2, first_reply))
+        .unwrap();
+    assert_eq!(
+        probe(&h),
+        Some(batch.clone()),
+        "the last index arriving first keeps the cache for the others"
+    );
+    let mid = refused(&h, dup, 0);
+    assert!(mid.text.contains("cannot fork"), "{}", mid.text);
+    assert_eq!(probe(&h), Some(batch.clone()));
+    let last = refused(&h, dup, 1);
+    assert!(last.text.contains("cannot fork"), "{}", last.text);
+    assert_eq!(
+        probe(&h),
+        None,
+        "the last member handled releases the parent transcript"
+    );
+    let done = first.recv_timeout(WAIT).unwrap();
+    assert!(done.text.contains("state=\"completed\""), "{}", done.text);
+    h.engine.shutdown();
+}
+
+/// A worktree agent's checkout runs off the engine thread, and a failed
+/// checkout still refuses the spawn.
+#[test]
+fn a_worktree_spawn_outside_a_repository_is_refused_after_its_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let parent = SessionId::new();
+    let mut defs = AgentDefs::builtin();
+    let mut def = defs.get("general").unwrap().clone();
+    def.isolation = Isolation::Worktree;
+    defs.insert(def);
+    h.engine.open(SessionSpec {
+        cx: AgentContext::new("m", "").with_workdir(dir.path().to_path_buf()),
+        agents: Some(AgentSetup {
+            defs: Arc::new(defs),
+            ..agent_setup(1, 1)
+        }),
+        ..h.spec(parent)
+    });
+    let (reply, answer) = crossbeam_channel::bounded(1);
+    let spawn = Spawn {
+        parent,
+        tool_call_id: ToolCallId::new("call_a"),
+        agent: "general".to_owned(),
+        description: "a task".to_owned(),
+        prompt: "work".to_owned(),
+        reply,
+        fork: false,
+        swarm: None,
+        model: None,
+        thinking: None,
+        background: false,
+    };
+    h.engine
+        .commander()
+        .0
+        .send(Input::Spawn(Box::new(spawn)))
+        .unwrap();
+    let refused = answer.recv_timeout(WAIT).unwrap();
+    assert!(refused.is_error);
+    assert!(
+        refused.text.contains("needs a git or jj repository"),
+        "{}",
+        refused.text
+    );
+    h.engine.shutdown();
+}
+
+/// Live `git rev-parse` processes working in `dir`.
+#[cfg(target_os = "linux")]
+fn rev_parse_in(dir: &std::path::Path) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let cwd = std::fs::read_link(entry.path().join("cwd")).ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let rev_parse = cmdline.windows(9).any(|w| w == b"rev-parse");
+            (cwd == dir && rev_parse).then_some(pid)
+        })
+        .collect()
+}
+
+/// A checkout that hangs runs off the engine thread: other inputs are
+/// still served meanwhile, and cancelling the parent stops the hung
+/// VCS command without opening the child.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_hung_worktree_checkout_does_not_stall_the_engine() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    // `git rev-parse` blocks opening the config include, a FIFO nobody
+    // writes, before the checkout writes anything.
+    let repo = tempfile::tempdir().unwrap();
+    let repo_path = repo.path().canonicalize().unwrap();
+    let fifo = repo_path.join("hang");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "include.path", fifo.to_str().unwrap()],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo_path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    let h = harness(MockProvider::sequence(vec![agent_turn(&[(
+        "call_a",
+        task("work"),
+    )])]));
+    let mut defs = AgentDefs::builtin();
+    let mut def = defs.get("general").unwrap().clone();
+    def.isolation = Isolation::Worktree;
+    defs.insert(def);
+    let parent = SessionId::new();
+    h.engine.open(SessionSpec {
+        cx: AgentContext::new("m", "").with_workdir(repo_path.clone()),
+        agents: Some(AgentSetup {
+            defs: Arc::new(defs),
+            ..agent_setup(1, 1)
+        }),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+
+    let deadline = Instant::now() + WAIT;
+    while rev_parse_in(&repo_path).is_empty() {
+        assert!(Instant::now() < deadline, "the checkout never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (reply, answer) = crossbeam_channel::bounded(1);
+    h.engine
+        .commander()
+        .0
+        .send(Input::HostedSessions(reply))
+        .unwrap();
+    let hosted = answer
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the engine stalled behind the checkout");
+    assert_eq!(hosted.len(), 1, "only the parent is hosted: {hosted:?}");
+
+    h.engine.send(Command::to(parent, CommandKind::Cancel));
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcomes(&events), [RunOutcome::Cancelled]);
+    let deadline = Instant::now() + WAIT;
+    while !rev_parse_in(&repo_path).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the hung checkout was not stopped"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (reply, answer) = crossbeam_channel::bounded(1);
+    h.engine
+        .commander()
+        .0
+        .send(Input::HostedSessions(reply))
+        .unwrap();
+    assert_eq!(answer.recv_timeout(WAIT).unwrap().len(), 1);
+    assert!(spawned(&events).is_empty());
     h.engine.shutdown();
 }

@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use kage_core::SessionId;
 use kage_core::reaper;
 use kage_core::sync::lock;
+use kage_core::{CancelFlag, SessionId};
 
 /// One agent's checkout. Dropping it removes the checkout in the
 /// background, without blocking the caller; work the agent left stays
@@ -55,23 +55,27 @@ impl Worktree {
     /// Make a checkout for the agent `id` under `dir`, of the repository
     /// that holds `parent_workdir`: a jj workspace when jj manages it,
     /// else a git worktree on a new branch from `HEAD`. `label` names
-    /// the agent's work in a git commit.
+    /// the agent's work in a git commit. Setting `cancel` stops the
+    /// command in flight.
     pub(super) fn create(
         parent_workdir: &Path,
         dir: &Path,
         id: SessionId,
         label: String,
+        cancel: &CancelFlag,
     ) -> Result<Self, String> {
+        let run = |dir: &Path, program: &str, args: &[&str]| {
+            run_until(dir, program, args, CREATE_COMMAND_TIMEOUT, Some(cancel))
+        };
         let short = short(id);
         let path = dir.join(id.to_string());
         let target = path.to_string_lossy().into_owned();
         let made = |what: &str, err: String| format!("cannot make the worktree {what}: {err}");
-        if let Ok(root) = run(parent_workdir, "jj", &["root"], COMMAND_TIMEOUT) {
+        if let Ok(root) = run(parent_workdir, "jj", &["root"]) {
             std::fs::create_dir_all(dir).map_err(|err| made("directory", err.to_string()))?;
             let workspace = format!("kage-{short}");
             let args = ["workspace", "add", "--name", &workspace, "-r", "@", &target];
-            run(parent_workdir, "jj", &args, COMMAND_TIMEOUT)
-                .map_err(|err| made("workspace", err))?;
+            run(parent_workdir, "jj", &args).map_err(|err| made("workspace", err))?;
             let repo = PathBuf::from(root);
             return Ok(Self {
                 workdir: inside(&path, &repo, parent_workdir),
@@ -81,19 +85,14 @@ impl Worktree {
                 vcs: Vcs::Jj { workspace },
             });
         }
-        if let Ok(root) = run(
-            parent_workdir,
-            "git",
-            &["rev-parse", "--show-toplevel"],
-            COMMAND_TIMEOUT,
-        ) {
+        if let Ok(root) = run(parent_workdir, "git", &["rev-parse", "--show-toplevel"]) {
             std::fs::create_dir_all(dir).map_err(|err| made("directory", err.to_string()))?;
             let repo = PathBuf::from(root);
-            let base = run(&repo, "git", &["rev-parse", "HEAD"], COMMAND_TIMEOUT)
-                .map_err(|err| made("base", err))?;
+            let base =
+                run(&repo, "git", &["rev-parse", "HEAD"]).map_err(|err| made("base", err))?;
             let branch = format!("kage/agent-{short}");
             let args = ["worktree", "add", "-b", &branch, &target, "HEAD"];
-            run(&repo, "git", &args, COMMAND_TIMEOUT).map_err(|err| made("checkout", err))?;
+            run(&repo, "git", &args).map_err(|err| made("checkout", err))?;
             return Ok(Self {
                 workdir: inside(&path, &repo, parent_workdir),
                 path,
@@ -101,6 +100,9 @@ impl Worktree {
                 label,
                 vcs: Vcs::Git { branch, base },
             });
+        }
+        if cancel.is_cancelled() {
+            return Err("cannot make the worktree: cancelled".to_owned());
         }
         Err("worktree isolation needs a git or jj repository".to_owned())
     }
@@ -186,11 +188,15 @@ impl Worktree {
     }
 }
 
-/// How long one VCS command of [`Worktree::create`] or
-/// [`Worktree::checkpoint`] may run before it is killed: long enough
-/// for a slow pre-commit hook or a large `git add -A`, but bounded so
-/// a stuck VCS cannot keep the parent from ever getting the agent's
-/// result.
+/// How long one VCS command of [`Worktree::create`] may run before it
+/// is killed: a large repository can take minutes to check out, and
+/// the agent being set up is the only thing waiting.
+const CREATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How long one VCS command of [`Worktree::checkpoint`] may run before
+/// it is killed: long enough for a slow pre-commit hook or a large
+/// `git add -A`, but bounded so a stuck VCS cannot keep the parent from
+/// ever getting the agent's result.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long one drop-path VCS command may run before it is killed:
@@ -319,6 +325,18 @@ fn wait_for_drops(timeout: Duration) -> bool {
 /// [`DRAIN_GRACE`] at most: no caller may wait on a stuck VCS forever,
 /// not even on an orphaned grandchild holding a pipe open.
 fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
+    run_until(dir, program, args, timeout, None)
+}
+
+/// Like [`run`], but setting `cancel` stops the child as a timeout
+/// does.
+fn run_until(
+    dir: &Path,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    cancel: Option<&CancelFlag>,
+) -> Result<String, String> {
     let mut command = Command::new(program);
     command.args(args).current_dir(dir);
     #[cfg(unix)]
@@ -349,6 +367,13 @@ fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<St
             stop(&mut child);
             return Err(format!(
                 "{program} {}: killed after {timeout:?}",
+                args.first().unwrap_or(&"")
+            ));
+        }
+        if cancel.is_some_and(CancelFlag::is_cancelled) {
+            stop(&mut child);
+            return Err(format!(
+                "{program} {}: cancelled",
                 args.first().unwrap_or(&"")
             ));
         }
@@ -495,6 +520,7 @@ mod tests {
             dir.path(),
             id,
             "general: add b".into(),
+            &CancelFlag::new(),
         )
         .unwrap();
         assert!(tree.workdir().ends_with("sub"), "{:?}", tree.workdir());
@@ -516,7 +542,14 @@ mod tests {
         );
 
         let id = SessionId::new();
-        let tree = Worktree::create(repo.path(), dir.path(), id, "general: look".into()).unwrap();
+        let tree = Worktree::create(
+            repo.path(),
+            dir.path(),
+            id,
+            "general: look".into(),
+            &CancelFlag::new(),
+        )
+        .unwrap();
         assert!(tree.checkpoint().contains("has no changes"));
         drop(tree);
         assert!(wait_for_drops(Duration::from_secs(30)));
@@ -532,7 +565,14 @@ mod tests {
         let repo = git_repo();
         let dir = tempfile::tempdir().unwrap();
         let id = SessionId::new();
-        let tree = Worktree::create(repo.path(), dir.path(), id, "general: add b".into()).unwrap();
+        let tree = Worktree::create(
+            repo.path(),
+            dir.path(),
+            id,
+            "general: add b".into(),
+            &CancelFlag::new(),
+        )
+        .unwrap();
         // An empty identity makes the checkpoint's commit fail even on
         // a machine with a global one, so the checkout stays staged
         // and the plain remove refuses it.
@@ -558,8 +598,14 @@ mod tests {
         sh(repo.path(), "jj", &["git", "init", "--quiet"]);
         std::fs::write(repo.path().join("a.txt"), "a\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let tree =
-            Worktree::create(repo.path(), dir.path(), SessionId::new(), "general".into()).unwrap();
+        let tree = Worktree::create(
+            repo.path(),
+            dir.path(),
+            SessionId::new(),
+            "general".into(),
+            &CancelFlag::new(),
+        )
+        .unwrap();
         assert!(tree.checkpoint().contains("has no changes"));
         std::fs::write(tree.workdir().join("b.txt"), "b\n").unwrap();
         let report = tree.checkpoint();
@@ -582,8 +628,14 @@ mod tests {
     fn outside_a_repository_there_is_no_worktree() {
         let plain = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let err = Worktree::create(plain.path(), dir.path(), SessionId::new(), String::new())
-            .unwrap_err();
+        let err = Worktree::create(
+            plain.path(),
+            dir.path(),
+            SessionId::new(),
+            String::new(),
+            &CancelFlag::new(),
+        )
+        .unwrap_err();
         assert_eq!(err, "worktree isolation needs a git or jj repository");
     }
 
@@ -633,6 +685,28 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "waited {:?} for a hung command",
+            started.elapsed()
+        );
+    }
+
+    /// Cancelling stops a command in flight, as a timeout does.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_command_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let started = Instant::now();
+        let stopper = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            stopper.cancel();
+        });
+        let err =
+            run_until(dir.path(), "sleep", &["30"], COMMAND_TIMEOUT, Some(&cancel)).unwrap_err();
+        assert!(err.ends_with("cancelled"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "waited {:?} for a cancelled command",
             started.elapsed()
         );
     }
