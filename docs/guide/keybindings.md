@@ -256,7 +256,9 @@ left side of the footer shows its keys, such as `enter to pick` and
 
 With mouse capture on (`/mouse on`, the default), the wheel scrolls
 the conversation. A click on a block focuses it, and a click on a
-block's first row folds or unfolds it. Dragging selects text, and
+block's first row folds or unfolds it. A click on the
+`new output below` mark, shown when output streams in while you are
+scrolled up, snaps back to the bottom. Dragging selects text, and
 dragging past the top or bottom edge scrolls. Releasing the button
 copies the selection to the clipboard and shows
 `copied N characters`. A right-click opens a menu for the block under

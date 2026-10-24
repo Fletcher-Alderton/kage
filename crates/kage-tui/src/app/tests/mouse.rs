@@ -319,3 +319,66 @@ fn a_click_in_the_buffer_keeps_modeless_focus_on_the_input() {
         assert_eq!(app.input.focused_pane(), pane, "modeless = {modeless}");
     }
 }
+
+#[test]
+fn clicking_the_new_output_mark_snaps_back_to_the_bottom() {
+    use ratatui::crossterm::event::MouseButton;
+    use ratatui::crossterm::event::MouseEventKind;
+
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    {
+        let mut buf = lock(&buffer);
+        for i in 0..40 {
+            buf.append_assistant_delta(&format!("reply {i}"));
+            buf.finish_streaming();
+        }
+    }
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    buffer.lock().unwrap().set_scroll(0);
+    app.render_into(&mut terminal).unwrap();
+
+    // First screen cell of the `new output below` mark, if one is
+    // painted on the buffer's last row.
+    let mark = |buffer: &SharedBuffer| {
+        let buf = buffer.lock().unwrap();
+        let y = buf.last_area_y() + buf.last_area_height() - 1;
+        (0..buf.last_area_width())
+            .find(|&c| buf.mark_hit_at(y, c))
+            .map(|c| (y, c))
+    };
+    let click = |row: u16, col: u16| ratatui::crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // Detaching alone paints no mark; output below the viewport does.
+    assert!(mark(&buffer).is_none(), "no mark before new output");
+    {
+        let mut buf = lock(&buffer);
+        buf.append_assistant_delta("streamed");
+        buf.finish_streaming();
+    }
+    app.render_into(&mut terminal).unwrap();
+    let (row, col) = mark(&buffer).expect("mark painted while scrolled up");
+
+    // A click beside the mark stays pinned and starts a selection.
+    app.handle_mouse_event(click(row, col - 1));
+    app.handle_mouse_event(ratatui::crossterm::event::MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: col - 1,
+        row,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(0));
+
+    // A click on the mark jumps to the bottom and re-arms follow.
+    app.handle_mouse_event(click(row, col));
+    assert!(buffer.lock().unwrap().is_following());
+    app.render_into(&mut terminal).unwrap();
+    assert!(mark(&buffer).is_none(), "following again, mark gone");
+}

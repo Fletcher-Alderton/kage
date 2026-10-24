@@ -2155,6 +2155,41 @@ fn a_pinned_view_shows_when_new_output_arrives_below() {
 }
 
 #[test]
+fn the_new_output_mark_records_a_hit_rect_only_while_painted() {
+    let mut buffer = Buffer::new();
+    for i in 0..30 {
+        buffer.append_assistant_delta(&format!("reply {i}"));
+        buffer.finish_streaming();
+    }
+    let area = Rect::new(0, 0, 40, 14);
+    let input = InputState::new();
+    snapshot_lines(&mut buffer, &input, area);
+    buffer.set_scroll(0);
+    snapshot_lines(&mut buffer, &input, area);
+    // Detaching alone paints no mark, so nothing is clickable.
+    let none_of = |buffer: &Buffer| {
+        let y = buffer.last_area_y() + buffer.last_area_height() - 1;
+        (0..40).all(|col| !buffer.mark_hit_at(y, col))
+    };
+    assert!(none_of(&buffer));
+    buffer.append_assistant_delta("streamed");
+    snapshot_lines(&mut buffer, &input, area);
+    let y = buffer.last_area_y() + buffer.last_area_height() - 1;
+    let hit: Vec<u16> = (0..area.width)
+        .filter(|&c| buffer.mark_hit_at(y, c))
+        .collect();
+    assert_eq!(hit.len(), 20, "the mark's cells, contiguous at the right");
+    assert!(
+        hit.windows(2).all(|w| w[1] == w[0] + 1) && hit[0] + 20 < area.width,
+        "{hit:?}"
+    );
+    assert!(!buffer.mark_hit_at(y - 1, hit[0]), "only the mark's row");
+    buffer.follow();
+    snapshot_lines(&mut buffer, &input, area);
+    assert!(none_of(&buffer));
+}
+
+#[test]
 fn unfolding_while_scrolled_up_is_not_new_output() {
     let mut buffer = Buffer::new();
     buffer.push_tool_call("c1", "shell", json!({"command": "seq 30"}));

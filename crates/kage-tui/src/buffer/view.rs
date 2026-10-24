@@ -343,6 +343,21 @@ impl Buffer {
         self.last_block_virtual_rows = rows;
     }
 
+    /// Renderer hook: record where this frame painted the
+    /// `new output below` mark, or `None` when it painted none. See
+    /// [`Self::mark_hit_at`].
+    pub fn set_last_mark_hit(&mut self, hit: Option<(u16, u16, u16)>) {
+        self.last_mark_hit = hit;
+    }
+
+    /// Whether `(row, col)` lands on the `new output below` mark the
+    /// last frame painted. `false` when the frame painted no mark.
+    #[must_use]
+    pub fn mark_hit_at(&self, row: u16, col: u16) -> bool {
+        self.last_mark_hit
+            .is_some_and(|(x, y, width)| row == y && col >= x && col < x.saturating_add(width))
+    }
+
     /// Unclamped `(virtual_top, virtual_bottom)` of the block at
     /// `idx` from the last frame, `bottom` exclusive. `None` when the
     /// block was not painted. Used by yank to map a selected row to
@@ -419,6 +434,7 @@ impl Buffer {
         self.last_area_width = snapshot.last_area_width;
         self.last_area_height = snapshot.last_area_height;
         self.last_virtual_top = snapshot.last_virtual_top;
+        self.last_mark_hit = snapshot.last_mark_hit;
         // The dirty flag is consumed by the rebuild that produced the
         // snapshot's fresh caches; copying it back keeps the live
         // buffer from re-serving a window that already rebuilt. A

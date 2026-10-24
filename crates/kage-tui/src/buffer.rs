@@ -551,6 +551,11 @@ pub struct Buffer {
     /// bottom. A higher serial since means output arrived out of
     /// sight. `None` while following.
     detached_at: Option<u64>,
+    /// Screen rectangle of the `new output below` mark in the last
+    /// painted frame as `(x, y, width)`; height is always one row.
+    /// The renderer rewrites it each frame; mouse handlers hit-test
+    /// clicks against it. `None` when no mark was painted.
+    last_mark_hit: Option<(u16, u16, u16)>,
 }
 
 /// What a [`ToolTopology`] was built from: `(epoch, block count, fold

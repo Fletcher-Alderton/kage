@@ -258,16 +258,20 @@ pub(super) fn render_buffer(
     frame.render_widget(paragraph.scroll((paragraph_scroll, 0)), regions.buffer);
     buffer.set_last_drawn_focus(focus);
     if buffer.has_unseen_output() {
-        render_new_output_mark(frame, regions.buffer);
+        render_new_output_mark(frame, buffer, regions.buffer);
+    } else {
+        buffer.set_last_mark_hit(None);
     }
 }
 
 /// Paint a `new output below` mark on the last row of `area`, against
-/// the right edge.
-fn render_new_output_mark(frame: &mut Frame, area: Rect) {
+/// the right edge, and record its screen rectangle for mouse
+/// hit-testing.
+fn render_new_output_mark(frame: &mut Frame, buffer: &mut Buffer, area: Rect) {
     const MARK: &str = " \u{2193} new output below ";
     let width = u16::try_from(MARK.width()).unwrap_or(u16::MAX);
     if area.height == 0 || area.width < width + 2 {
+        buffer.set_last_mark_hit(None);
         return;
     }
     let theme = crate::theme::current();
@@ -276,9 +280,9 @@ fn render_new_output_mark(frame: &mut Frame, area: Rect) {
         .bg(theme.input_pill_insert_bg)
         .add_modifier(DECORATION_MARKER);
     let x = area.right() - width - 2;
-    frame
-        .buffer_mut()
-        .set_string(x, area.bottom() - 1, MARK, style);
+    let y = area.bottom() - 1;
+    frame.buffer_mut().set_string(x, y, MARK, style);
+    buffer.set_last_mark_hit(Some((x, y, width)));
 }
 
 /// Compute the emphasis for the displayed block at `idx`. `focus` is

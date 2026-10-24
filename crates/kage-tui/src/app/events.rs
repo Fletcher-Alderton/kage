@@ -310,6 +310,12 @@ impl App {
             self.open_agents();
             return;
         }
+        // A press on the `new output below` mark snaps back to the
+        // bottom and re-arms follow instead of starting a selection.
+        if lock(&self.buffer).mark_hit_at(row, col) {
+            self.follow();
+            return;
+        }
         self.captured_rows.clear();
         let mut buf = lock(&self.buffer);
         let area_y = buf.last_area_y();
