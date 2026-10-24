@@ -134,6 +134,8 @@ impl ProviderError {
         if kind.contains("overloaded")
             || kind.contains("server_error")
             || kind.contains("unavailable")
+            || kind.contains("internal")
+            || kind.contains("deadline_exceeded")
             || kind == "api_error"
             || kind
                 .parse::<u16>()
@@ -347,6 +349,8 @@ mod tests {
             "server_error",
             "api_error",
             "UNAVAILABLE",
+            "INTERNAL",
+            "DEADLINE_EXCEEDED",
             "500",
             "503",
         ] {

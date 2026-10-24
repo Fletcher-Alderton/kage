@@ -1298,6 +1298,31 @@ mod tests {
     }
 
     #[test]
+    fn stream_error_chunk_internal_is_transient() {
+        let bytes: &[u8] = b"data: {\"error\":{\"code\":500,\"message\":\"Internal error\",\"status\":\"INTERNAL\"}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        match first {
+            Err(err) => assert!(err.is_transient(), "INTERNAL should retry: {err:?}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_error_chunk_deadline_exceeded_is_transient() {
+        let bytes: &[u8] = b"data: {\"error\":{\"code\":504,\"message\":\"Request deadline exceeded\",\"status\":\"DEADLINE_EXCEEDED\"}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        match first {
+            Err(err) => assert!(
+                err.is_transient(),
+                "DEADLINE_EXCEEDED should retry: {err:?}"
+            ),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn stream_emits_text_deltas() {
         let bytes: &[u8] = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}],\"role\":\"model\"},\"index\":0}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":1}}\n\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" world\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2}}\n\n";
         let events = collect_ok(stream_from_bytes(bytes));
