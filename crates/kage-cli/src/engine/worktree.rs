@@ -7,7 +7,7 @@
 
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -204,6 +204,10 @@ const DROP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 /// before giving up on an orphaned grandchild holding the pipe open.
 const DRAIN_GRACE: Duration = Duration::from_millis(250);
 
+/// How long a timed-out command has between SIGTERM and SIGKILL:
+/// enough for git to remove its lock files on the way out.
+const TERM_GRACE: Duration = Duration::from_secs(2);
+
 /// Drop-path cleanups started but not finished. Production drops are
 /// detached and unsignalled; only tests wait for this to reach zero.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -317,6 +321,13 @@ fn wait_for_drops(timeout: Duration) -> bool {
 fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
     let mut command = Command::new(program);
     command.args(args).current_dir(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Own process group, so a timeout also stops the hooks the VCS
+        // started.
+        command.process_group(0);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -335,8 +346,7 @@ fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<St
             Err(err) => return Err(format!("{program}: {err}")),
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = reaper::wait(&mut child);
+            stop(&mut child);
             return Err(format!(
                 "{program} {}: killed after {timeout:?}",
                 args.first().unwrap_or(&"")
@@ -356,6 +366,28 @@ fn run(dir: &Path, program: &str, args: &[&str], timeout: Duration) -> Result<St
             String::from_utf8_lossy(&stderr).trim()
         ))
     }
+}
+
+/// Stop a timed-out child and its process group: SIGTERM first, so
+/// git can remove its lock files, then SIGKILL after [`TERM_GRACE`]
+/// for whatever is left.
+fn stop(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{Signal, killpg};
+        let pgid = nix::unistd::Pid::from_raw(child.id().cast_signed());
+        if killpg(pgid, Signal::SIGTERM).is_ok() {
+            let deadline = Instant::now() + TERM_GRACE;
+            while matches!(reaper::try_wait(child), Ok(None)) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let _ = killpg(pgid, Signal::SIGKILL);
+            let _ = reaper::wait(child);
+            return;
+        }
+    }
+    let _ = child.kill();
+    let _ = reaper::wait(child);
 }
 
 /// A pipe drained into a shared buffer on its own thread, so the
@@ -603,6 +635,56 @@ mod tests {
             "waited {:?} for a hung command",
             started.elapsed()
         );
+    }
+
+    /// A timed-out command gets SIGTERM before SIGKILL, so git can
+    /// remove its lock files.
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_command_is_terminated_before_it_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "trap 'touch terminated; exit 1' TERM; sleep 30 & wait";
+        let err = run(
+            dir.path(),
+            "sh",
+            &["-c", script],
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(err.contains("killed after"), "{err}");
+        assert!(dir.path().join("terminated").exists());
+    }
+
+    /// A timeout stops the whole process group, not only the direct
+    /// child, so a hook the VCS started does not outlive it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_timeout_stops_the_grandchildren_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "trap '' TERM; sleep 30 & echo $! > pid; wait";
+        let err = run(
+            dir.path(),
+            "sh",
+            &["-c", script],
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(err.contains("killed after"), "{err}");
+        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        let stat = format!("/proc/{}/stat", pid.trim());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let alive = loop {
+            let alive = std::fs::read_to_string(&stat).is_ok_and(|text| {
+                text.rsplit(')')
+                    .next()
+                    .is_some_and(|rest| !rest.trim_start().starts_with('Z'))
+            });
+            if !alive || Instant::now() >= deadline {
+                break alive;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        assert!(!alive, "the grandchild survived the timeout");
     }
 
     /// A drop whose cleanup command hangs must return at once, and the
