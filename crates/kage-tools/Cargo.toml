@@ -15,6 +15,7 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 globset.workspace = true
 grep.workspace = true
 html2text.workspace = true

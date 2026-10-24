@@ -1,10 +1,11 @@
 //! `read` tool: read a file from the workspace, optionally limited to a line range.
 
 use std::fmt::Write;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek};
 use std::path::Path;
 
-use kage_core::{Risk, ToolOutput};
+use base64::Engine as _;
+use kage_core::{Risk, ToolMedia, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -12,6 +13,11 @@ use crate::{Tool, ToolContext, ToolError, schema_for};
 
 /// Files larger than this are truncated; the model is told via a footer.
 const MAX_BYTES: usize = 2_000_000;
+
+/// Largest image the tool attaches to its result, in raw bytes.
+/// Anthropic accepts at most 5 MB per image before base64 encoding, so
+/// staying under it keeps the attachment deliverable to every provider.
+const MAX_IMAGE_BYTES: usize = 5_000_000;
 
 /// Input shape for the `read` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -41,7 +47,9 @@ impl Tool for ReadTool {
     fn description(&self) -> &'static str {
         "Read a file. Optional `start_line` and `end_line` limit \
          the returned range (1-indexed, inclusive). The returned range \
-         is capped at 2MB; a capped read says so."
+         is capped at 2MB; a capped read says so. Images (png, jpeg, \
+         gif, webp) come back as an image attached to the result \
+         instead of text, so a model that sees images can view them."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -70,6 +78,19 @@ impl Tool for ReadTool {
             .metadata()
             .map_err(ToolError::io_at("read", &path))?
             .len();
+        // Sniff the head before treating the file as text: an image
+        // comes back whole as attached media, everything else is
+        // rewound and sliced line by line.
+        let mut file = file;
+        let mut head = Vec::with_capacity(16);
+        (&mut file)
+            .take(16)
+            .read_to_end(&mut head)
+            .map_err(ToolError::io_at("read", &path))?;
+        if let Some(mime) = kage_core::image::sniff_mime(&head) {
+            return read_image(&path, &input, file, total_bytes, mime);
+        }
+        file.rewind().map_err(ToolError::io_at("read", &path))?;
         // Slice before capping: lines are streamed, so memory stays
         // bounded by the cap rather than by the file, and a range past
         // the byte cap still returns its lines.
@@ -83,6 +104,67 @@ impl Tool for ReadTool {
             media: Vec::new(),
         })
     }
+}
+
+/// `path` holds image bytes the sniffer recognized: attach the whole
+/// file to the result as base64 media instead of its text, so a model
+/// that reads images sees it and hosts render it. An image past
+/// [`MAX_IMAGE_BYTES`] is refused with its size, which the model can
+/// act on by downscaling with `shell`, rather than silently dropped.
+fn read_image(
+    path: &Path,
+    input: &ReadInput,
+    mut file: std::fs::File,
+    total_bytes: u64,
+    mime: &'static str,
+) -> Result<ToolOutput, ToolError> {
+    let too_large = |bytes: usize| {
+        ToolError::InvalidInput(format!(
+            "{} is a {} {}; the largest image this tool attaches is {} ({} bytes). \
+             Downscale or re-encode it first, then read it again",
+            input.path,
+            kage_core::image::human_bytes(bytes),
+            mime,
+            kage_core::image::human_bytes(MAX_IMAGE_BYTES),
+            MAX_IMAGE_BYTES,
+        ))
+    };
+    if usize::try_from(total_bytes).map_or(true, |n| n > MAX_IMAGE_BYTES) {
+        return Err(too_large(
+            usize::try_from(total_bytes).unwrap_or(usize::MAX),
+        ));
+    }
+    // The metadata check bounds the common case; the take bounds a
+    // file that grew between the two. The sniffer consumed the head,
+    // so rewind first.
+    file.rewind().map_err(ToolError::io_at("read", path))?;
+    let mut bytes = Vec::with_capacity(usize::try_from(total_bytes).unwrap_or(0));
+    (&mut file)
+        .take(MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(ToolError::io_at("read", path))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(too_large(bytes.len()));
+    }
+    let mut text = format!(
+        "{} is an image ({}, {}). It comes with this result, and the user sees it.",
+        input.path,
+        mime,
+        kage_core::image::human_bytes(bytes.len()),
+    );
+    if input.start_line.is_some() || input.end_line.is_some() {
+        text.push_str(" Line ranges do not apply to images.");
+    }
+    Ok(ToolOutput {
+        is_error: false,
+        text,
+        structured: None,
+        terminate: false,
+        media: vec![ToolMedia {
+            mime: mime.to_owned(),
+            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }],
+    })
 }
 
 /// Stream the line range out of the file behind `input`, appending the
@@ -473,6 +555,105 @@ mod tests {
         assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
         assert!(err.to_string().contains("bin.dat"), "{err}");
         assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
+
+    /// One small file per sniffable format: the tool attaches it as
+    /// base64 media instead of rejecting it as binary.
+    #[test]
+    fn image_files_come_back_as_attached_media() {
+        use base64::Engine as _;
+        let cases: [(&str, Vec<u8>, &str); 4] = [
+            (
+                "shot.png",
+                [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 7, 8].into(),
+                "image/png",
+            ),
+            (
+                "photo.jpg",
+                [0xFF, 0xD8, 0xFF, 0xE0, 1, 2].into(),
+                "image/jpeg",
+            ),
+            ("anim.gif", b"GIF89a\x01\x00\x01\x00".to_vec(), "image/gif"),
+            (
+                "pic.webp",
+                b"RIFF\x12\x00\x00\x00WEBPVP8 ".to_vec(),
+                "image/webp",
+            ),
+        ];
+        for (name, bytes, mime) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join(name), &bytes).unwrap();
+            let out = run(&ReadTool, dir.path(), serde_json::json!({"path": name})).unwrap();
+            assert!(!out.is_error, "{name}");
+            assert_eq!(out.media.len(), 1, "{name}");
+            assert_eq!(out.media[0].mime, mime, "{name}");
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(&out.media[0].data)
+                    .unwrap(),
+                bytes,
+                "{name}"
+            );
+            assert!(
+                out.text.contains(name) && out.text.contains(mime),
+                "{}",
+                out.text
+            );
+        }
+    }
+
+    /// A text file named `.png` is read as text: the sniffer trusts
+    /// bytes, never the declared extension.
+    #[test]
+    fn an_extension_alone_does_not_make_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("fake.png"), "just text").unwrap();
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"fake.png"}),
+        )
+        .unwrap();
+        assert!(out.media.is_empty());
+        assert_eq!(out.text, "just text");
+    }
+
+    #[test]
+    fn an_oversized_image_is_refused_with_its_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.resize(MAX_IMAGE_BYTES + 1, 0);
+        fs::write(dir.path().join("huge.png"), &bytes).unwrap();
+        let err = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"huge.png"}),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("huge.png"), "{msg}");
+        assert!(msg.contains("Downscale"), "{msg}");
+        assert!(msg.contains(&MAX_IMAGE_BYTES.to_string()), "{msg}");
+    }
+
+    #[test]
+    fn line_ranges_are_ignored_for_images_with_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        fs::write(dir.path().join("shot.png"), png).unwrap();
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"shot.png","start_line":1,"end_line":2}),
+        )
+        .unwrap();
+        assert_eq!(out.media.len(), 1);
+        assert!(
+            out.text.contains("Line ranges do not apply to images"),
+            "{}",
+            out.text
+        );
     }
 
     #[test]
