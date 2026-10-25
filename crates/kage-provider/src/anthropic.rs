@@ -18,6 +18,8 @@ use crate::{
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
+/// Smallest `budget_tokens` Anthropic accepts.
+const MIN_THINKING_BUDGET: u32 = 1_024;
 /// Beta that lets manual (`enabled`) thinking think between tool calls
 /// on Claude 4 models up to 4.5. The API ignores it on other models.
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
@@ -169,7 +171,7 @@ fn apply_thinking(body: &mut Value, req: &StreamRequest) {
     let open = !continues_unsigned_turn(req);
     if let Some(thinking) = &req.thinking {
         if open {
-            body["thinking"] = enabled(thinking.budget_tokens);
+            enable_budget(body, req, thinking.budget_tokens);
         }
         return;
     }
@@ -190,10 +192,35 @@ fn apply_thinking(body: &mut Value, req: &StreamRequest) {
             if let Some(budget) = req.reasoning.budget(level)
                 && open
             {
-                body["thinking"] = enabled(budget);
+                enable_budget(body, req, budget);
             }
         }
     }
+}
+
+/// Turn on budget thinking. Anthropic rejects a `budget_tokens` that is
+/// not below `max_tokens`. With no requested ceiling the default
+/// `max_tokens` is raised to leave reply room past the budget. A
+/// requested ceiling is kept, since it may be the model's limit or
+/// fitted to the window, and an oversized budget halves the ceiling
+/// instead. Thinking stays off when that half is under
+/// [`MIN_THINKING_BUDGET`].
+fn enable_budget(body: &mut Value, req: &StreamRequest, budget: u32) {
+    let budget = match req.max_output_tokens {
+        None => {
+            body["max_tokens"] =
+                serde_json::json!(budget.saturating_add(DEFAULT_MAX_OUTPUT_TOKENS));
+            budget
+        }
+        Some(ceiling) if budget >= ceiling => {
+            if ceiling / 2 < MIN_THINKING_BUDGET {
+                return;
+            }
+            ceiling / 2
+        }
+        Some(_) => budget,
+    };
+    body["thinking"] = enabled(budget);
 }
 
 fn enabled(budget_tokens: u32) -> Value {
@@ -838,6 +865,33 @@ mod thinking_tests {
         let body = build_request_body(&request(r, ThinkingLevel::High), false);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 20_000);
+        assert_eq!(body["max_tokens"], 24_096);
+    }
+
+    #[test]
+    fn a_budget_past_the_requested_ceiling_halves_it() {
+        let mut req = request(Reasoning::Toggle, ThinkingLevel::High);
+        req.max_output_tokens = Some(8_192);
+        let body = build_request_body(&req, false);
+        assert_eq!(body["max_tokens"], 8_192);
+        assert_eq!(body["thinking"]["budget_tokens"], 4_096);
+    }
+
+    #[test]
+    fn a_budget_under_the_requested_ceiling_is_kept() {
+        let mut req = request(Reasoning::Toggle, ThinkingLevel::High);
+        req.max_output_tokens = Some(64_000);
+        let body = build_request_body(&req, false);
+        assert_eq!(body["max_tokens"], 64_000);
+        assert_eq!(body["thinking"]["budget_tokens"], 16_384);
+    }
+
+    #[test]
+    fn a_ceiling_too_small_for_thinking_leaves_it_off() {
+        let mut req = request(Reasoning::Toggle, ThinkingLevel::High);
+        req.max_output_tokens = Some(1_500);
+        let body = build_request_body(&req, false);
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]
