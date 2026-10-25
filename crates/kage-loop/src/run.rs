@@ -23,7 +23,9 @@ use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, R
 use kage_provider::{Provider, ProviderError, StreamRequest};
 use kage_tools::ToolRegistry;
 
-use crate::compact::{KEEP_RECENT, MAX_OVERFLOW_COMPACTIONS, compact_with_keep, maybe_compact};
+use crate::compact::{
+    KEEP_RECENT, MAX_OVERFLOW_COMPACTIONS, compact_with_keep, fit_output_ceiling, maybe_compact,
+};
 use crate::dispatch::{dispatch_tool_calls, dispatch_tool_calls_parallel, unrun_results};
 use crate::doom::DoomTracker;
 use crate::stream::{TurnFailure, TurnResult, collect_turn};
@@ -580,7 +582,9 @@ fn build_request(
         req.system = Some(cx.system_prompt.clone());
     }
     req.tools = tools.list_for_provider();
-    req.max_output_tokens = cx.max_output_tokens;
+    req.max_output_tokens = cx
+        .max_output_tokens
+        .map(|ceiling| fit_output_ceiling(cx, ceiling));
     req.level = cx.reasoning.resolve(cx.thinking_level);
     req.reasoning = cx.reasoning;
     req.produces = cx.produces;

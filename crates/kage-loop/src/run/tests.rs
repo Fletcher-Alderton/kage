@@ -94,6 +94,57 @@ fn build_request_leaves_max_output_tokens_unset_when_context_default() {
     assert!(req.max_output_tokens.is_none());
 }
 
+/// A context shaped like the session that hit the 400: a 262K window,
+/// a 128K output limit, and 158K of history billed on the last turn.
+fn filled_context(current_context: u64) -> AgentContext {
+    let mut cx = AgentContext::new("m", "")
+        .with_context_window(262_144)
+        .with_max_output_tokens(128_000);
+    cx.history.push(Arc::new(user_msg("go")));
+    cx.history.push(Arc::new(assistant_msg(vec![Content::Text {
+        text: "ok".into(),
+    }])));
+    cx.budget.current_context = current_context;
+    cx
+}
+
+#[test]
+fn build_request_fits_the_output_ceiling_into_the_window() {
+    let cx = filled_context(158_005);
+    let req = build_request(&cx, &ToolRegistry::new(), &MockProvider::sequence(vec![]));
+    let ceiling = u64::from(req.max_output_tokens.unwrap());
+    assert!(ceiling < 128_000);
+    assert!(158_005 + ceiling <= 262_144);
+}
+
+#[test]
+fn build_request_keeps_the_full_ceiling_when_it_fits() {
+    let cx = filled_context(20_000);
+    let req = build_request(&cx, &ToolRegistry::new(), &MockProvider::sequence(vec![]));
+    assert_eq!(req.max_output_tokens, Some(128_000));
+}
+
+#[test]
+fn build_request_counts_results_added_since_the_last_turn() {
+    let mut cx = filled_context(100_000);
+    cx.history.push(Arc::new(user_msg(&"x".repeat(400_000))));
+    let req = build_request(&cx, &ToolRegistry::new(), &MockProvider::sequence(vec![]));
+    let ceiling = u64::from(req.max_output_tokens.unwrap());
+    assert!(100_000 + 100_000 + ceiling <= 262_144);
+}
+
+#[test]
+fn build_request_never_drops_below_reply_and_thinking_room() {
+    let mut cx = filled_context(261_000);
+    cx.reasoning = kage_core::Reasoning::Budget {
+        min: 1_024,
+        max: None,
+        toggle: true,
+    };
+    let req = build_request(&cx, &ToolRegistry::new(), &MockProvider::sequence(vec![]));
+    assert_eq!(req.max_output_tokens, Some(8_192 + 16_384));
+}
+
 fn assistant_msg(content: Vec<Content>) -> Message {
     Message::new(Role::Assistant, content, None)
 }

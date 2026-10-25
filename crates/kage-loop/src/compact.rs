@@ -57,8 +57,19 @@ const SUMMARIZE_ATTEMPTS: u32 = 3;
 
 /// Output tokens reserved for the model's reply: compaction also
 /// triggers when the live context plus this reserve reaches the
-/// window, so a long reply cannot overflow mid-generation.
+/// window, so the output ceiling is not squeezed to a short reply.
+/// Capped at what the model can emit, so a small output limit does
+/// not compact early to keep room it can never use.
 const OUTPUT_RESERVE: u64 = 50_000;
+
+/// Smallest reply room a request asks for, on top of any thinking
+/// budget. When the window cannot fit even this, the request goes out
+/// anyway and a provider rejection triggers recovery compaction.
+const MIN_REPLY_TOKENS: u32 = 8_192;
+
+/// Tokens charged per image block, about what providers bill for a
+/// full-size screenshot.
+const IMAGE_TOKENS: u64 = 1_600;
 
 /// Token cap for the newest preserved user messages from the
 /// summarized region.
@@ -307,9 +318,67 @@ fn should_compact(cx: &AgentContext, config: LoopConfig) -> bool {
     // conversation. The reserve guard trips before the
     // threshold when the remaining room can no longer hold a full
     // reply, so a long generation cannot overflow the window.
-    let reserve = OUTPUT_RESERVE.min(cx.context_window / 2);
-    cx.budget.current_context >= threshold
-        || cx.budget.current_context.saturating_add(reserve) >= cx.context_window
+    let reply = cx.max_output_tokens.map_or(OUTPUT_RESERVE, u64::from);
+    let reserve = OUTPUT_RESERVE
+        .min(reply.saturating_add(estimate_margin(cx.context_window)))
+        .min(cx.context_window / 2);
+    let input = estimate_next_input(cx);
+    input >= threshold || input.saturating_add(reserve) >= cx.context_window
+}
+
+/// Estimated prompt size of the next request built from `cx`. The last
+/// turn's reported fill covers history through the newest assistant
+/// message; what follows it (tool results, a new user message) is
+/// estimated. With no reported fill, as in a fresh or just-compacted
+/// context, the system prompt and whole history are estimated.
+pub(crate) fn estimate_next_input(cx: &AgentContext) -> u64 {
+    let (base, tail) = if cx.budget.current_context == 0 {
+        (estimate_tokens(&cx.system_prompt), &cx.history[..])
+    } else {
+        let start = cx
+            .history
+            .iter()
+            .rposition(|m| m.role == Role::Assistant)
+            .map_or(0, |i| i + 1);
+        (cx.budget.current_context, &cx.history[start..])
+    };
+    let images = tail
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|c| matches!(c, Content::Image { .. }))
+        .count() as u64;
+    base.saturating_add(estimate_tokens(&serialize_conversation(tail)))
+        .saturating_add(images.saturating_mul(IMAGE_TOKENS))
+}
+
+/// Slack for [`estimate_next_input`] error: 2% of the window.
+fn estimate_margin(window: u64) -> u64 {
+    window / 50
+}
+
+/// `ceiling` lowered so the estimated input plus the requested output
+/// fits the window. Providers reject `input + max_tokens > window` up
+/// front, so asking for a model's full output limit on a well-filled
+/// context fails even when the reply would be short. The
+/// [`estimate_margin`] absorbs estimate error. The result never drops below room for a
+/// short reply plus the thinking budget, nor rises above `ceiling`.
+pub(crate) fn fit_output_ceiling(cx: &AgentContext, ceiling: u32) -> u32 {
+    if cx.context_window == 0 {
+        return ceiling;
+    }
+    let thinking = cx
+        .reasoning
+        .resolve(cx.thinking_level)
+        .and_then(|level| cx.reasoning.budget(level))
+        .unwrap_or(0);
+    let floor = MIN_REPLY_TOKENS.saturating_add(thinking).min(ceiling);
+    let room = cx
+        .context_window
+        .saturating_sub(estimate_next_input(cx))
+        .saturating_sub(estimate_margin(cx.context_window));
+    u32::try_from(room)
+        .unwrap_or(u32::MAX)
+        .clamp(floor, ceiling)
 }
 
 /// Instruction sent as the summarizer request's system prompt. The
@@ -654,6 +723,24 @@ mod tests {
             cx.history.push(Arc::new(msg));
         }
         cx
+    }
+
+    #[test]
+    fn the_reserve_shrinks_to_a_small_output_limit() {
+        let mut cx = loaded_context(150_000, 4);
+        let config = LoopConfig::default();
+        assert!(should_compact(&cx, config));
+        cx.max_output_tokens = Some(8_192);
+        assert!(!should_compact(&cx, config));
+    }
+
+    #[test]
+    fn results_after_the_last_turn_count_toward_the_threshold() {
+        let mut cx = loaded_context(120_000, 4);
+        let config = LoopConfig::default();
+        assert!(!should_compact(&cx, config));
+        cx.history.push(Arc::new(user_msg(&"x".repeat(40_000 * 4))));
+        assert!(should_compact(&cx, config));
     }
 
     #[test]

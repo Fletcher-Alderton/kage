@@ -149,12 +149,17 @@ impl ProviderError {
 
 /// Phrases providers use to refuse a request that exceeds the model's
 /// context window, matched case-insensitively. Anthropic: "prompt is
-/// too long". `OpenAI`: "maximum context length". Gemini: "input token
-/// count exceeds".
-const OVERFLOW_MARKERS: [&str; 4] = [
+/// too long", and "input length and `max_tokens` exceed context limit"
+/// when the output ceiling is what tips the request over. `OpenAI`:
+/// "maximum context length". Gemini: "input token count exceeds".
+/// Anthropic-compatible gateways: "against a 262,144-token window".
+const OVERFLOW_MARKERS: [&str; 7] = [
     "prompt is too long",
+    "prompt too long",
     "context length",
     "context window",
+    "context limit",
+    "token window",
     "input token count",
 ];
 
@@ -252,6 +257,9 @@ mod tests {
             "This model's maximum context length is 8192 tokens",
             "input token count (250000) exceeds the maximum (1000000)",
             "conversation exceeds the model context window",
+            "input length and `max_tokens` exceed context limit: 158005 + 128000 > 200000",
+            "This session is too large to send: about 158,005 input tokens plus a \
+             128,000-token output ceiling against a 262,144-token window.",
         ] {
             assert!(
                 ProviderError::Http {
