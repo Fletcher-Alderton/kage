@@ -3121,10 +3121,12 @@ dependencies = [
  "serde_json",
  "signal-hook 0.4.4",
  "tempfile",
+ "thiserror 2.0.21",
  "toml 1.1.6+spec-1.1.0",
  "tungstenite",
  "ulid",
  "ureq 3.4.2",
+ "url",
 ]
 
 [[package]]
@@ -3296,6 +3298,7 @@ dependencies = [
  "thiserror 2.0.21",
  "ureq 3.4.2",
  "url",
+ "zstd",
 ]
 
 [[package]]

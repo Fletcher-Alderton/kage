@@ -518,7 +518,7 @@ from Lua as `kage.action.scroll(n)`.
 `CycleThinkingLevel` steps the thinking level (also `alt+t`),
 visiting only the levels the model accepts. The level a new TUI
 session starts on comes from `[ui] thinking_level` (one of `off`,
-`minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Left unset, it is
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`). Left unset, it is
 automatic: high, or the nearest level the model accepts. The cycle
 still overrides it per session. See
 [thinking](/guide/providers#thinking).

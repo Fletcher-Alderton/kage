@@ -2299,7 +2299,7 @@ fn a_new_session_lists_model_thinking_and_mode() {
     assert_eq!(
         values_of(&options[1], "value"),
         [
-            "default", "off", "minimal", "low", "medium", "high", "xhigh", "max"
+            "default", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
         ]
     );
     assert_eq!(

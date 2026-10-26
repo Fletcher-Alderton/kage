@@ -7,11 +7,12 @@
 //! a richer SSE event vocabulary. The Codex (`gpt-5-codex`,
 //! `gpt-5.1-codex-*`) models are first-class here.
 //!
-//! Provider id: `openai-responses`. Users address models as
-//! `openai-responses:gpt-5-codex`. The host shares its `OPENAI_API_KEY`
-//! with this provider; nothing in the credential store is duplicated.
+//! Provider id: `openai`, kage's built-in `OpenAI` provider. Chat
+//! Completions stays in [`crate::openai`] for the providers that speak
+//! that protocol.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt;
 use std::io::{BufReader, Read};
 
 use kage_core::{CancelFlag, Content, Message, Reasoning, Role, ToolCallId};
@@ -22,11 +23,15 @@ use crate::{
     StopReason, StreamRequest, ToolSpec,
 };
 
+use crate::bearer::SharedBearer;
+
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
 
+/// The zstd level of compressed bodies, the one the Codex CLI uses.
+const ZSTD_LEVEL: i32 = 3;
+
 /// `OpenAI` Responses API provider.
-#[derive(Debug)]
 pub struct OpenAiResponsesProvider {
     api_key: String,
     base_url: String,
@@ -38,6 +43,31 @@ pub struct OpenAiResponsesProvider {
     models: Vec<ProviderModel>,
     /// Whether every model is offered `OpenAI`'s hosted image tool.
     image_generation: bool,
+    /// Renewable credential (an OAuth login). When set, `api_key` is
+    /// ignored and a 401 refreshes once and retries.
+    bearer: Option<SharedBearer>,
+    /// Whether requests follow the `ChatGPT` backend's rules: no
+    /// `max_output_tokens` or `temperature`, and the session as the
+    /// prompt cache key.
+    chatgpt: bool,
+    /// Whether request bodies go out zstd-compressed.
+    zstd: bool,
+}
+
+impl fmt::Debug for OpenAiResponsesProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiResponsesProvider")
+            .field("api_key", &(!self.api_key.is_empty()).then_some("<set>"))
+            .field("base_url", &self.base_url)
+            .field("metadata", &self.metadata)
+            .field("extra_headers", &self.extra_headers)
+            .field("models", &self.models.len())
+            .field("image_generation", &self.image_generation)
+            .field("bearer", &self.bearer.as_ref().map(|_| "<set>"))
+            .field("chatgpt", &self.chatgpt)
+            .field("zstd", &self.zstd)
+            .finish()
+    }
 }
 
 impl OpenAiResponsesProvider {
@@ -54,8 +84,8 @@ impl OpenAiResponsesProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             metadata: ProviderMetadata {
-                id: "openai-responses".into(),
-                display_name: "OpenAI Responses".into(),
+                id: "openai".into(),
+                display_name: "OpenAI".into(),
                 supports_caching: false,
                 supports_thinking: true,
                 supports_tool_use: true,
@@ -63,22 +93,43 @@ impl OpenAiResponsesProvider {
             extra_headers: BTreeMap::new(),
             models: Vec::new(),
             image_generation: false,
+            bearer: None,
+            chatgpt: false,
+            zstd: false,
         }
     }
 
     /// The streaming body for `req`, with the hosted image tool offered
-    /// when the provider switch is on.
+    /// when the provider switch is on, in the `ChatGPT` backend's shape
+    /// when that is the endpoint.
     fn request_body(&self, req: &StreamRequest) -> Value {
-        if !self.image_generation {
-            return build_request_body(req, true);
+        let mut body = if self.image_generation {
+            let mut req = req.clone();
+            req.produces = req
+                .produces
+                .iter()
+                .chain([kage_core::Modality::Text, kage_core::Modality::Image])
+                .collect();
+            build_request_body(&req, true)
+        } else {
+            build_request_body(req, true)
+        };
+        if self.chatgpt
+            && let Some(fields) = body.as_object_mut()
+        {
+            fields.remove("max_output_tokens");
+            fields.remove("temperature");
+            if let Some(Value::Object(reasoning)) = fields.get_mut("reasoning") {
+                reasoning.insert("summary".to_owned(), Value::String("auto".to_owned()));
+            }
+            if let Some(session) = &req.session {
+                fields.insert(
+                    "prompt_cache_key".to_owned(),
+                    Value::String(session.clone()),
+                );
+            }
         }
-        let mut req = req.clone();
-        req.produces = req
-            .produces
-            .iter()
-            .chain([kage_core::Modality::Text, kage_core::Modality::Image])
-            .collect();
-        build_request_body(&req, true)
+        body
     }
 
     /// Offer `OpenAI`'s hosted image tool to every model, as if each said
@@ -105,12 +156,46 @@ impl OpenAiResponsesProvider {
         self
     }
 
+    /// Draw the credential from `source` instead of the fixed API key:
+    /// the token of the moment rides every request, and a 401 refreshes
+    /// once and retries. For OAuth-backed logins the host renews.
+    #[must_use]
+    pub fn with_bearer(mut self, source: SharedBearer) -> Self {
+        self.bearer = Some(source);
+        self
+    }
+
+    /// Shape requests for the `ChatGPT` backend: it answers
+    /// `max_output_tokens` with a 400 and serves only reasoning models,
+    /// which refuse `temperature`, and it routes its prompt cache on the
+    /// session, sent as `prompt_cache_key` and a `session-id` header.
+    /// Reasoning asks for summaries, as the Codex CLI does, so thinking
+    /// shows; the public API refuses them for unverified organizations,
+    /// so they stay off there.
+    #[must_use]
+    pub fn for_chatgpt_backend(mut self) -> Self {
+        self.chatgpt = true;
+        self
+    }
+
+    /// Send request bodies zstd-compressed. The `ChatGPT` backend
+    /// decodes them and refuses plain bodies past about 1 MiB; a proxy
+    /// in front of it may not, so this stays a separate switch.
+    #[must_use]
+    pub fn with_zstd_bodies(mut self) -> Self {
+        self.zstd = true;
+        self
+    }
+
     /// Headers every request carries: content type, the bearer
-    /// credential (skipped when no key is configured), then the
-    /// configured extras in key order.
-    fn request_headers(&self) -> Vec<(String, String)> {
-        let credential = (!self.api_key.is_empty())
-            .then(|| ("authorization", format!("Bearer {}", self.api_key)));
+    /// credential (`token` from a [`crate::bearer::BearerSource`], else
+    /// the API key, skipped when neither is set), then the configured
+    /// extras in key order.
+    fn request_headers(&self, token: Option<&str>) -> Vec<(String, String)> {
+        let credential = token
+            .map(str::to_owned)
+            .or_else(|| (!self.api_key.is_empty()).then(|| self.api_key.clone()))
+            .map(|key| ("authorization", format!("Bearer {key}")));
         crate::headers::request_headers(
             &[("content-type", "application/json".to_owned())],
             credential,
@@ -146,18 +231,66 @@ impl Provider for OpenAiResponsesProvider {
         }
         let body = self.request_body(&req);
         let url = format!("{}/responses", self.base_url);
-        let mut headers = self.request_headers();
+        let session = req.session.as_deref();
+        let Some(source) = &self.bearer else {
+            return self.dispatch(&body, &url, None, session, cancel);
+        };
+        // A rejected renewable credential gets exactly one
+        // refresh-and-retry; a still-rejected token then fails as the
+        // auth error it is.
+        let sent = source.token();
+        match self.dispatch(&body, &url, Some(&sent), session, cancel) {
+            Err(ProviderError::Auth(_)) => {
+                let fresh = source.refresh(&sent)?;
+                self.dispatch(&body, &url, Some(&fresh), session, cancel)
+            }
+            other => other,
+        }
+    }
+}
+
+impl OpenAiResponsesProvider {
+    /// Send one request with bearer `token` (else the API key) and turn
+    /// a non-2xx status into its error.
+    fn dispatch(
+        &self,
+        body: &Value,
+        url: &str,
+        token: Option<&str>,
+        session: Option<&str>,
+        cancel: &CancelFlag,
+    ) -> Result<EventStream, ProviderError> {
+        let mut headers = self.request_headers(token);
         headers.extend(crate::headers::opencode_headers(
             &self.base_url,
-            req.session.as_deref(),
+            session,
             &self.extra_headers,
         ));
+        if self.chatgpt
+            && let Some(session) = session
+            && !self
+                .extra_headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("session-id"))
+        {
+            headers.push(("session-id".to_owned(), session.to_owned()));
+        }
+        let json = serde_json::to_vec(body).map_err(|e| ProviderError::Decode(e.to_string()))?;
+        let payload = if self.zstd {
+            let compressed = zstd::stream::encode_all(json.as_slice(), ZSTD_LEVEL)
+                .map_err(|e| ProviderError::Transport(format!("compress the request: {e}")))?;
+            headers.push(("content-encoding".to_owned(), "zstd".to_owned()));
+            compressed
+        } else {
+            json
+        };
+        let url = url.to_owned();
         let (response, kill) = crate::http::send(cancel, url, move |agent, url| {
             let mut request = agent.post(url);
             for (name, value) in &headers {
                 request = request.header(name.as_str(), value.as_str());
             }
-            request.send_json(&body)
+            request.send(payload.as_slice())
         })?;
 
         let status = response.status().as_u16();
@@ -1321,7 +1454,7 @@ mod tests {
         extras.insert("X-A".to_owned(), "1".to_owned());
         let provider = OpenAiResponsesProvider::new("k").with_extra_headers(extras);
         assert_eq!(
-            provider.request_headers(),
+            provider.request_headers(None),
             vec![
                 ("content-type".to_owned(), "application/json".to_owned()),
                 ("authorization".to_owned(), "Bearer k".to_owned()),
@@ -1336,7 +1469,7 @@ mod tests {
         let mut extras = BTreeMap::new();
         extras.insert("X-A".to_owned(), "1".to_owned());
         let provider = OpenAiResponsesProvider::new("").with_extra_headers(extras);
-        let headers = provider.request_headers();
+        let headers = provider.request_headers(None);
         assert!(
             headers.iter().all(|(name, _)| name != "authorization"),
             "no credential header without a key: {headers:?}"
@@ -1356,6 +1489,250 @@ mod tests {
         let provider = OpenAiResponsesProvider::new("k").with_models(models.clone());
         assert_eq!(provider.models(), models);
         assert!(OpenAiResponsesProvider::new("k").models().is_empty());
+    }
+
+    struct FixedBearer {
+        token: std::sync::Mutex<String>,
+        rejected: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FixedBearer {
+        fn new(token: &str) -> Self {
+            Self {
+                token: std::sync::Mutex::new(token.to_owned()),
+                rejected: std::sync::Mutex::default(),
+            }
+        }
+    }
+
+    impl crate::bearer::BearerSource for FixedBearer {
+        fn token(&self) -> String {
+            self.token.lock().unwrap().clone()
+        }
+
+        fn refresh(&self, rejected: &str) -> Result<String, ProviderError> {
+            self.rejected.lock().unwrap().push(rejected.to_owned());
+            "refreshed".clone_into(&mut self.token.lock().unwrap());
+            Ok(self.token())
+        }
+    }
+
+    #[test]
+    fn request_headers_prefer_the_bearer_token_over_the_stored_key() {
+        let provider = OpenAiResponsesProvider::new("static");
+        let find = |headers: &[(String, String)]| {
+            headers
+                .iter()
+                .find(|(n, _)| n == "authorization")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            find(&provider.request_headers(Some("oauth"))),
+            "Bearer oauth"
+        );
+        assert_eq!(find(&provider.request_headers(None)), "Bearer static");
+    }
+
+    #[test]
+    fn the_chatgpt_backend_body_drops_refused_fields_and_keys_the_cache() {
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        req.temperature = Some(0.2);
+        req.session = Some("ses-1".to_owned());
+        req.level = Some(kage_core::ThinkingLevel::Low);
+        let public = OpenAiResponsesProvider::new("k").request_body(&req);
+        assert!(public.get("max_output_tokens").is_some());
+        assert!(public.get("temperature").is_some());
+        assert!(public.get("prompt_cache_key").is_none());
+        assert!(public["reasoning"].get("summary").is_none(), "{public}");
+        let chatgpt = OpenAiResponsesProvider::new("k")
+            .for_chatgpt_backend()
+            .request_body(&req);
+        assert!(chatgpt.get("max_output_tokens").is_none(), "{chatgpt}");
+        assert!(chatgpt.get("temperature").is_none(), "{chatgpt}");
+        assert_eq!(chatgpt["prompt_cache_key"], "ses-1");
+        assert_eq!(chatgpt["reasoning"]["effort"], "low");
+        assert_eq!(chatgpt["reasoning"]["summary"], "auto");
+        assert_eq!(chatgpt["store"], false);
+    }
+
+    /// A zstd provider compresses the body and says so; the `ChatGPT`
+    /// mode adds the session header.
+    #[test]
+    fn a_zstd_provider_sends_a_compressed_body_with_the_session_header() {
+        use std::io::Write as _;
+
+        const SSE: &str =
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\n";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 8192];
+            let head_end = loop {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+            };
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: "))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            while raw.len() < head_end + length {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let _ = conn.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{SSE}",
+                    SSE.len()
+                )
+                .as_bytes(),
+            );
+            (head, raw[head_end..head_end + length].to_vec())
+        });
+        let provider = OpenAiResponsesProvider::with_base_url("k", origin)
+            .for_chatgpt_backend()
+            .with_zstd_bodies();
+        let mut req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        req.session = Some("ses-9".to_owned());
+        collect_ok(provider.stream(req, &CancelFlag::new()).unwrap());
+        let (head, body) = server.join().unwrap();
+        assert!(head.contains("\r\ncontent-encoding: zstd\r\n"), "{head}");
+        assert!(head.contains("\r\nsession-id: ses-9\r\n"), "{head}");
+        let json: Value =
+            serde_json::from_slice(&zstd::stream::decode_all(body.as_slice()).unwrap()).unwrap();
+        assert_eq!(json["model"], "gpt-5");
+        assert_eq!(json["prompt_cache_key"], "ses-9");
+    }
+
+    #[test]
+    fn debug_redacts_the_api_key() {
+        let debug = format!("{:?}", OpenAiResponsesProvider::new("sk-secret"));
+        assert!(!debug.contains("sk-secret"), "{debug}");
+        assert!(debug.contains("<set>"), "{debug}");
+    }
+
+    /// A 401 on a renewable credential refreshes once and replays the
+    /// request with the fresh token; the stream then proceeds.
+    #[test]
+    fn a_rejected_bearer_refreshes_once_and_retries() {
+        use std::io::Write as _;
+
+        const SSE: &str =
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\n";
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let tokens: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let seen = Arc::clone(&tokens);
+        std::thread::spawn(move || {
+            for (i, conn) in listener.incoming().enumerate() {
+                let Ok(mut conn) = conn else { return };
+                let mut buf = [0u8; 8192];
+                let _ = conn.read(&mut buf);
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let token = head
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("authorization"))
+                    .and_then(|l| l.split_once(' '))
+                    .map(|(_, t)| t.to_owned())
+                    .unwrap_or_default();
+                seen.lock().unwrap().push(token);
+                if i == 0 {
+                    let body = "{\"error\":{\"message\":\"token expired\"}}";
+                    let _ = conn.write_all(
+                        format!(
+                            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .into_bytes()
+                        .as_slice(),
+                    );
+                } else {
+                    let _ = conn.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                             content-length: {}\r\nconnection: close\r\n\r\n{SSE}",
+                            SSE.len()
+                        )
+                        .into_bytes()
+                        .as_slice(),
+                    );
+                }
+            }
+        });
+
+        let bearer = Arc::new(FixedBearer::new("stale"));
+        let provider = OpenAiResponsesProvider::with_base_url("", origin)
+            .with_bearer(Arc::clone(&bearer) as _);
+        let req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        let events = collect_ok(provider.stream(req, &CancelFlag::new()).unwrap());
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProviderEvent::TextDelta { delta } if delta == "ok"
+            )),
+            "{events:?}"
+        );
+        assert_eq!(
+            *tokens.lock().unwrap(),
+            ["Bearer stale", "Bearer refreshed"]
+        );
+        assert_eq!(*bearer.rejected.lock().unwrap(), ["stale"]);
+    }
+
+    /// When refresh itself fails, the 401 surfaces as the auth error.
+    #[test]
+    fn a_failed_refresh_leaves_the_auth_error() {
+        struct Refuses;
+        impl crate::bearer::BearerSource for Refuses {
+            fn token(&self) -> String {
+                "stale".to_owned()
+            }
+
+            fn refresh(&self, _rejected: &str) -> Result<String, ProviderError> {
+                Err(ProviderError::Auth("login expired".to_owned()))
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { return };
+                let mut buf = [0u8; 8192];
+                let _ = conn.read(&mut buf);
+                let body = "{\"error\":{\"message\":\"expired\"}}";
+                let _ = std::io::Write::write_all(
+                    &mut conn,
+                    format!(
+                        "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .into_bytes()
+                    .as_slice(),
+                );
+            }
+        });
+        let provider =
+            OpenAiResponsesProvider::with_base_url("", origin).with_bearer(Arc::new(Refuses));
+        let req = StreamRequest::new("gpt-5", vec![Arc::new(user_msg("hi"))]);
+        let Err(err) = provider.stream(req, &CancelFlag::new()) else {
+            panic!("expected the auth error")
+        };
+        assert!(
+            matches!(err, ProviderError::Auth(ref detail) if detail == "login expired"),
+            "{err:?}"
+        );
     }
 }
 

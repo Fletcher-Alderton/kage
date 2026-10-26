@@ -99,6 +99,11 @@ pub struct OAuthCredential {
     /// Space-delimited scope string the provider granted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Provider-specific account or workspace id parsed from the
+    /// login's `id_token` (the `ChatGPT` `chatgpt_account_id`). Sent as
+    /// a request header where the backend requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
 }
 
 impl OAuthCredential {
@@ -133,6 +138,7 @@ impl fmt::Debug for OAuthCredential {
             )
             .field("expires_at", &self.expires_at)
             .field("scope", &self.scope)
+            .field("account_id", &self.account_id)
             .finish()
     }
 }
@@ -263,6 +269,15 @@ impl AuthStore {
         })
     }
 
+    /// The stored credential `provider`'s public API accepts:
+    /// [`Self::credential`], except a `ChatGPT` login (an OAuth record
+    /// under `openai`), which only the `ChatGPT` backend takes.
+    #[must_use]
+    pub fn api_credential(&self, provider: &str) -> Option<&Credential> {
+        self.credential(provider)
+            .filter(|c| provider != "openai" || !c.is_oauth())
+    }
+
     /// Look up a single bearer token for `provider`, regardless of
     /// credential kind. For API keys returns the raw key; for OAuth
     /// returns the access token *as currently stored*, which may be
@@ -304,7 +319,6 @@ impl AuthStore {
 
     /// Insert or replace `provider`'s credential as an OAuth record.
     /// Convenience wrapper around [`Self::set`].
-    #[cfg(test)]
     pub fn set_oauth(&mut self, provider: &str, creds: OAuthCredential) -> Option<Credential> {
         self.set(provider, Credential::Oauth(creds))
     }
@@ -368,13 +382,11 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
 ];
 
 /// Env-var name that, when set, supersedes any saved key for `provider`.
-/// `openai-responses` shares `OPENAI_API_KEY`: both providers are
-/// registered from the same credential at runtime.
 #[must_use]
 pub fn env_var_for(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "ANTHROPIC_API_KEY",
-        "openai" | "openai-responses" => "OPENAI_API_KEY",
+        "openai" => "OPENAI_API_KEY",
         "google" => "GEMINI_API_KEY",
         "zai" => "ZAI_API_KEY",
         "zai-coding-plan" | "zhipuai-coding-plan" => "ZAI_CODING_API_KEY",
@@ -400,10 +412,12 @@ pub fn env_var_for(provider: &str) -> &'static str {
     }
 }
 
-/// `kage auth login [provider]`: read an API key from a hidden prompt
-/// and persist it to the auth store. `provider` may name a builtin or
-/// catalog id, or a custom provider declared under
-/// `[providers.custom.*]` in `config`.
+/// `kage auth login [provider]`: sign in and persist the credential.
+/// `provider` may name a builtin or catalog id, or a custom provider
+/// declared under `[providers.custom.*]` in `config`. The `OpenAI`
+/// family offers the choice of a `ChatGPT` sign-in (the browser OAuth
+/// flow, stored as an OAuth credential) or a plain API key; every
+/// other provider prompts for a key.
 pub fn run_login(provider: Option<&str>, config: &kage_core::config::Config) -> ExitCode {
     let provider = match select_provider(provider, config) {
         Ok(p) => p,
@@ -412,6 +426,63 @@ pub fn run_login(provider: Option<&str>, config: &kage_core::config::Config) -> 
             return ExitCode::from(2);
         }
     };
+    if provider == "openai" {
+        return run_openai_login();
+    }
+    run_login_api_key(&provider)
+}
+
+/// The `OpenAI` login: pick `ChatGPT` sign-in or an API key, then store
+/// the result under `openai`.
+fn run_openai_login() -> ExitCode {
+    let items = [
+        kage_tui::PickItem::simple("chatgpt")
+            .with_label("Sign in with ChatGPT (uses your ChatGPT plan)"),
+        kage_tui::PickItem::simple("api").with_label("Use an OpenAI API key"),
+    ];
+    let choice = match kage_tui::pick("How do you want to sign in to OpenAI?", &items) {
+        Ok(Some(choice)) => choice,
+        Ok(None) => {
+            eprintln!("kage: cancelled");
+            return ExitCode::from(2);
+        }
+        Err(_) => "api".to_owned(),
+    };
+    if choice != "chatgpt" {
+        return run_login_api_key("openai");
+    }
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let credential = match crate::chatgpt::login(&cancel) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut store = match AuthStore::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(e) = crate::chatgpt::models_cache_path()
+        .and_then(|cache| crate::chatgpt::refresh_models(&credential, &cache))
+    {
+        eprintln!("kage: {e}; `kage models refresh` retries");
+    }
+    store.set_oauth("openai", credential);
+    if let Err(e) = store.save() {
+        eprintln!("kage: {e}");
+        return ExitCode::from(1);
+    }
+    eprintln!("kage: signed in with ChatGPT; `openai` models now use your plan");
+    ExitCode::SUCCESS
+}
+
+/// The API-key path of [`run_login`], factored out so the `OpenAI`
+/// fallback reuses it.
+fn run_login_api_key(provider: &str) -> ExitCode {
     let mut store = match AuthStore::load() {
         Ok(s) => s,
         Err(e) => {
@@ -430,7 +501,7 @@ pub fn run_login(provider: Option<&str>, config: &kage_core::config::Config) -> 
             return ExitCode::from(1);
         }
     };
-    store.set_api_key(&provider, key);
+    store.set_api_key(provider, key);
     if let Err(e) = store.save() {
         eprintln!("kage: {e}");
         return ExitCode::from(1);
@@ -484,7 +555,8 @@ impl ProviderKey {
 
     /// [`Self::source`] against an injected env check and clock, so
     /// callers can rate providers without touching the process env or
-    /// the wall clock. An OAuth row carries its expiry label.
+    /// the wall clock. An OAuth row carries its expiry label, and the
+    /// `openai` row names a `ChatGPT` login as one.
     pub(crate) fn source_with(
         &self,
         store: &AuthStore,
@@ -495,10 +567,15 @@ impl ProviderKey {
             return Some("no key needed".to_owned());
         }
         let env = (!self.env.is_empty() && env_set(&self.env)).then_some(self.env.as_str());
+        let kind = if self.id == "openai" {
+            "ChatGPT login"
+        } else {
+            "oauth"
+        };
         let stored = store.credential(&self.id).map(|c| match c {
             Credential::Oauth(o) => match o.expires_at {
-                Some(at) => format!("auth.json (oauth, {})", expiry_label(at, now)),
-                None => "auth.json (oauth)".to_owned(),
+                Some(at) => format!("auth.json ({kind}, {})", expiry_label(at, now)),
+                None => format!("auth.json ({kind})"),
             },
             Credential::ApiKey { .. } => "auth.json".to_owned(),
         });
@@ -821,6 +898,27 @@ mod tests {
         assert!(raw.contains("\"key\": \"sk-ant-old\""));
     }
 
+    /// A `ChatGPT` login is no key for `OpenAI`'s public API, and
+    /// `auth list` names it on the `openai` row, which counts as ready.
+    #[test]
+    fn a_chatgpt_login_is_no_public_api_credential() {
+        let mut store = AuthStore::empty();
+        store.set_oauth("openai", OAuthCredential::default());
+        assert!(store.api_credential("openai").is_none());
+        let row = ProviderKey {
+            id: "openai".to_owned(),
+            env: String::new(),
+            keyless: false,
+        };
+        assert_eq!(
+            row.source_with(&store, |_| false, fixed_now()).as_deref(),
+            Some("auth.json (ChatGPT login)")
+        );
+
+        store.set_api_key("openai", "sk-1");
+        assert!(store.api_credential("openai").is_some());
+    }
+
     #[test]
     fn oauth_credential_round_trips() {
         let mut store = AuthStore::empty();
@@ -830,6 +928,7 @@ mod tests {
             refresh_token: Some("refresh-1".into()),
             expires_at: Some(expires_at),
             scope: Some("scope-x".into()),
+            account_id: Some("acc-7".into()),
         };
         store.set_oauth("anthropic", oauth.clone());
         let dir = tempdir().unwrap();
@@ -855,6 +954,7 @@ mod tests {
             refresh_token: None,
             expires_at: Some(now + Duration::seconds(120)),
             scope: None,
+            account_id: None,
         };
         assert!(!oauth.expires_within(Duration::seconds(60), now));
         assert!(oauth.expires_within(Duration::seconds(120), now));
@@ -877,6 +977,7 @@ mod tests {
             refresh_token: Some("refresh-secret".into()),
             expires_at: Some(fixed_now()),
             scope: Some("read".into()),
+            account_id: None,
         };
         let mut store = AuthStore::empty();
         store.set_api_key("anthropic", "sk-ant-secret");
@@ -967,8 +1068,8 @@ mod tests {
     }
 
     /// The one credential list behind `auth list`, doctor and init:
-    /// custom env names, synthesized env names, and the
-    /// `openai-responses` alias must all resolve here.
+    /// custom env names and synthesized env names must both resolve
+    /// here.
     #[test]
     fn provider_keys_resolve_every_credential_shape() {
         let config: kage_core::config::Config = toml::from_str(
@@ -987,8 +1088,6 @@ mod tests {
         let synth = keys.iter().find(|k| k.id == "synth").unwrap();
         assert_eq!(synth.env, "SYNTH_API_KEY", "the env name is synthesized");
         assert!(!synth.keyless);
-
-        assert_eq!(env_var_for("openai-responses"), "OPENAI_API_KEY");
     }
 
     #[test]
@@ -1029,7 +1128,7 @@ mod tests {
             },
         );
         store.set_oauth(
-            "openai",
+            "lab",
             OAuthCredential {
                 access_token: "t".into(),
                 expires_at: Some(fixed_now() - Duration::hours(1)),
@@ -1037,10 +1136,7 @@ mod tests {
             },
         );
         let mut keys = provider_keys(&env_config("zai", "KAGE_TEST_UNSET_ZAI"));
-        keys.extend(provider_keys(&env_config(
-            "openai",
-            "KAGE_TEST_UNSET_OPENAI",
-        )));
+        keys.extend(provider_keys(&env_config("lab", "KAGE_TEST_UNSET_LAB")));
         let mut out = Vec::new();
         write_list(&mut out, &keys, &store, fixed_now()).unwrap();
         let out = String::from_utf8(out).unwrap();
@@ -1049,8 +1145,8 @@ mod tests {
             zai.contains("auth.json (oauth, expires in 3 days)"),
             "{zai}"
         );
-        let openai = out.lines().find(|l| l.starts_with("openai ")).unwrap();
-        assert!(openai.contains("has expired"), "{openai}");
+        let lab = out.lines().find(|l| l.starts_with("lab ")).unwrap();
+        assert!(lab.contains("has expired"), "{lab}");
     }
 
     #[test]

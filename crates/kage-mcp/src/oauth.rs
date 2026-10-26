@@ -293,6 +293,18 @@ impl Pkce {
             challenge,
         })
     }
+
+    /// The S256 challenge the authorize URL carries.
+    #[must_use]
+    pub fn challenge(&self) -> &str {
+        &self.challenge
+    }
+
+    /// The verifier the code exchange proves possession with.
+    #[must_use]
+    pub fn verifier(&self) -> &str {
+        &self.verifier
+    }
 }
 
 impl fmt::Debug for Pkce {
@@ -306,7 +318,7 @@ impl fmt::Debug for Pkce {
 
 /// What the authorization redirect must carry to be accepted: this
 /// login's random `state`, and the issuer's `iss` when present or
-/// promised.
+/// promised. An `Expected` without an issuer checks the state alone.
 pub struct Expected {
     state: String,
     issuer: String,
@@ -327,6 +339,27 @@ impl Expected {
         })
     }
 
+    /// A fresh random state for a login whose issuer is fixed by the
+    /// host rather than discovered, so the redirect's `iss` is not
+    /// checked.
+    ///
+    /// # Errors
+    ///
+    /// [`OAuthError::Local`] when the system has no random source.
+    pub fn state_only() -> Result<Self, OAuthError> {
+        Ok(Self {
+            state: random_token()?,
+            issuer: String::new(),
+            iss_required: false,
+        })
+    }
+
+    /// The `state` the authorize URL carries.
+    #[must_use]
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
     /// Check the query of a redirect and return its code.
     fn accept(&self, query: &str) -> Result<AuthCode, OAuthError> {
         let (mut state, mut code, mut iss, mut error) = (None, None, None, None);
@@ -344,6 +377,7 @@ impl Expected {
             return Err(OAuthError::State);
         }
         match iss {
+            _ if self.issuer.is_empty() => {}
             Some(iss) if iss != self.issuer => {
                 return Err(OAuthError::Redirect("names another issuer"));
             }
@@ -371,6 +405,15 @@ impl fmt::Debug for Expected {
 
 /// An authorization code from the redirect, redeemed by [`exchange`].
 pub struct AuthCode(String);
+
+impl AuthCode {
+    /// The code itself, for a host that redeems it at its own token
+    /// endpoint.
+    #[must_use]
+    pub fn secret(&self) -> &str {
+        &self.0
+    }
+}
 
 impl fmt::Debug for AuthCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -412,36 +455,67 @@ pub fn authorize_url(
     Ok(url.into())
 }
 
-/// A one-shot redirect listener on 127.0.0.1 and an ephemeral port.
+/// A one-shot redirect listener on 127.0.0.1, serving one callback
+/// path.
 #[derive(Debug)]
 pub struct Loopback {
     listener: TcpListener,
     port: u16,
+    path: &'static str,
 }
 
 impl Loopback {
-    /// Bind 127.0.0.1 on a port the system picks.
+    /// Bind 127.0.0.1 on a port the system picks, serving `/callback`.
     ///
     /// # Errors
     ///
     /// [`OAuthError::Local`] when the socket cannot be bound.
     pub fn bind() -> Result<Self, OAuthError> {
-        let local = |e: std::io::Error| OAuthError::Local(format!("loopback listener: {e}"));
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(local)?;
-        let port = listener.local_addr().map_err(local)?.port();
-        Ok(Self { listener, port })
+        Self::bind_on(&[0], "/callback")
     }
 
-    /// The redirect URI to register and send: `/callback` on this
+    /// Bind 127.0.0.1 on the first free port of `ports`, serving
+    /// `path`, for a client whose redirect URIs are registered on fixed
+    /// ports. The standard listener sets `SO_REUSEADDR` on unix, so a
+    /// second login rebinds while the last one's connections sit in
+    /// `TIME_WAIT`.
+    ///
+    /// # Errors
+    ///
+    /// [`OAuthError::Local`] when no port of `ports` can be bound.
+    pub fn bind_on(ports: &[u16], path: &'static str) -> Result<Self, OAuthError> {
+        let mut last = None;
+        for &port in ports {
+            match TcpListener::bind((Ipv4Addr::LOCALHOST, port)).and_then(|listener| {
+                let port = listener.local_addr()?.port();
+                Ok(Self {
+                    listener,
+                    port,
+                    path,
+                })
+            }) {
+                Ok(loopback) => return Ok(loopback),
+                Err(e) => last = Some(e),
+            }
+        }
+        let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+        Err(OAuthError::Local(format!(
+            "loopback listener on port {}: {}",
+            ports.join(" or "),
+            last.map_or_else(|| "no port to bind".to_owned(), |e| e.to_string())
+        )))
+    }
+
+    /// The redirect URI to register and send: the callback path on this
     /// listener.
     #[must_use]
     pub fn redirect_uri(&self) -> String {
-        format!("http://127.0.0.1:{}/callback", self.port)
+        format!("http://127.0.0.1:{}{}", self.port, self.path)
     }
 
-    /// Serve until the first request for `/callback` and return its
-    /// code, answering any other path with 404. The listener closes when
-    /// this returns.
+    /// Serve until the first request for the callback path and return
+    /// its code, answering any other path with 404. The listener closes
+    /// when this returns.
     ///
     /// # Errors
     ///
@@ -467,7 +541,7 @@ impl Loopback {
             }
             match self.listener.accept() {
                 Ok((stream, _)) => {
-                    if let Some(result) = serve_callback(&stream, expected) {
+                    if let Some(result) = serve_callback(&stream, self.path, expected) {
                         return result;
                     }
                 }
@@ -482,13 +556,14 @@ impl Loopback {
 /// callback (another path, or no readable request), so the wait goes on.
 fn serve_callback(
     mut stream: &TcpStream,
+    callback: &str,
     expected: &Expected,
 ) -> Option<Result<AuthCode, OAuthError>> {
     stream.set_nonblocking(false).ok()?;
     stream.set_read_timeout(Some(READ_TIMEOUT)).ok()?;
     let target = read_target(stream)?;
     let (path, query) = target.split_once('?').unwrap_or((&target, ""));
-    if path != "/callback" {
+    if path != callback {
         respond(&mut stream, "404 Not Found", "Not found.");
         return None;
     }
@@ -930,7 +1005,8 @@ fn rejected(what: &'static str, status: u16, answer: &Value) -> OAuthError {
 
 /// An OAuth error code cut to its RFC 6749 character set and a short
 /// length, so a server cannot smuggle arbitrary text into a message.
-fn error_code(error: &str) -> String {
+#[must_use]
+pub fn error_code(error: &str) -> String {
     error
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
@@ -1343,6 +1419,40 @@ mod tests {
             issuer: "https://auth.example.com".to_owned(),
             iss_required,
         }
+    }
+
+    /// A listener on a host-chosen path answers only that path, and a
+    /// state-only expectation ignores the redirect's `iss`.
+    #[test]
+    fn a_loopback_on_a_fixed_path_checks_the_state_alone() {
+        let loopback = Loopback::bind_on(&[0], "/auth/callback").unwrap();
+        let port = loopback.port;
+        assert_eq!(
+            loopback.redirect_uri(),
+            format!("http://127.0.0.1:{port}/auth/callback")
+        );
+        let expected = Expected::state_only().unwrap();
+        let state = expected.state().to_owned();
+        let browser = std::thread::spawn(move || {
+            [
+                browse(port, "/callback?code=wrong-path"),
+                browse(
+                    port,
+                    &format!("/auth/callback?code=c1&state={state}&iss=https://elsewhere"),
+                ),
+            ]
+        });
+        let code = loopback
+            .wait(&expected, Duration::from_secs(10), &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(code.secret(), "c1");
+        let [wrong, ok] = browser.join().unwrap();
+        assert!(wrong.contains("404"), "{wrong}");
+        assert!(ok.contains("200"), "{ok}");
+
+        let taken = Loopback::bind_on(&[0], "/x").unwrap();
+        let err = Loopback::bind_on(&[taken.port], "/x").unwrap_err();
+        assert!(matches!(err, OAuthError::Local(_)), "{err}");
     }
 
     #[test]

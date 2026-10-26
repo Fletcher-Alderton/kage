@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use super::REDACTED;
 use crate::auth::{self, AuthStore};
+use crate::chatgpt;
 
 /// How long the model list may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -55,17 +56,32 @@ pub(crate) fn probe(probe: &ProviderProbe, config: &Config, store: &AuthStore) -
 }
 
 /// The target `probe` names: its own fields, then the saved entry for
-/// its id, then the provider's defaults.
+/// its id, then the provider's defaults. `openai` with no key typed or
+/// exported and a `ChatGPT` login stored lists the backend's
+/// models with that login, the way the registry would route it.
 fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<Target, String> {
     let id = probe.id.as_str();
     if id.is_empty() {
         return Err("name the provider to test".to_owned());
     }
+    let typed = probe.api_key.as_deref().filter(|key| !key.is_empty());
+    let env = probe
+        .api_key_env
+        .clone()
+        .unwrap_or_else(|| key_env(id, config));
+    let exported = (!env.is_empty())
+        .then(|| std::env::var(&env).ok())
+        .flatten()
+        .filter(|value| !value.is_empty());
+    let chatgpt = match (id, typed, &exported) {
+        ("openai", None, None) => chatgpt_login(store),
+        _ => None,
+    };
     let custom = config.providers.custom.get(id);
     let builtin = config.providers.overrides.get(id);
     let compat = COMPAT_PROVIDERS.iter().find(|entry| entry.id == id);
     let kind = match probe.kind.as_deref() {
-        Some("openai" | "openai-responses") => Kind::OpenAi,
+        Some("openai") => Kind::OpenAi,
         Some("anthropic") => Kind::Anthropic,
         Some("gemini") => Kind::Gemini,
         Some(other) => return Err(format!("unknown protocol `{other}`")),
@@ -78,9 +94,10 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
         },
     };
     let default_base = match id {
+        _ if chatgpt.is_some() => Some(chatgpt::BACKEND_BASE_URL),
         "anthropic" => Some("https://api.anthropic.com"),
         "google" => Some("https://generativelanguage.googleapis.com"),
-        "openai" | "openai-responses" => Some("https://api.openai.com/v1"),
+        "openai" => Some("https://api.openai.com/v1"),
         _ => compat.map(|entry| entry.base_url),
     };
     let base = probe
@@ -94,34 +111,29 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
     if !(base.starts_with("http://") || base.starts_with("https://")) {
         return Err(format!("{base} is not an http(s) URL"));
     }
-    let key = if let Some(key) = probe.api_key.as_deref().filter(|key| !key.is_empty()) {
+    let key = if let Some(key) = typed {
         key.to_owned()
+    } else if let Some(login) = &chatgpt {
+        login.access_token.clone()
+    } else if env.is_empty() {
+        String::new()
     } else {
-        let env = probe
-            .api_key_env
-            .clone()
-            .unwrap_or_else(|| key_env(id, config));
-        if env.is_empty() {
-            String::new()
-        } else {
-            crate::providers::lookup_key_with_env(id, &env, store)
-                .ok_or_else(|| format!("no key: {env} is not set and no key is saved for {id}"))?
-        }
+        exported.map_or_else(|| saved_key(id, &env, store), Ok)?
     };
     let saved = custom
         .map(|custom| &custom.headers)
         .or_else(|| builtin.map(|o| &o.headers));
-    let headers = probe
-        .headers
-        .iter()
-        .filter_map(|(name, value)| {
-            if value == REDACTED {
-                saved?.get(name).map(|value| (name.clone(), value.clone()))
-            } else {
-                Some((name.clone(), value.clone()))
-            }
-        })
-        .collect();
+    let mut headers = chatgpt
+        .as_ref()
+        .map(|login| chatgpt::backend_headers(login.account_id.as_deref()))
+        .unwrap_or_default();
+    headers.extend(probe.headers.iter().filter_map(|(name, value)| {
+        if value == REDACTED {
+            saved?.get(name).map(|value| (name.clone(), value.clone()))
+        } else {
+            Some((name.clone(), value.clone()))
+        }
+    }));
     let saved_models_url = custom
         .map(|custom| custom.models_url.clone())
         .unwrap_or_default();
@@ -136,17 +148,44 @@ fn resolve(probe: &ProviderProbe, config: &Config, store: &AuthStore) -> Result<
     {
         return Err(format!("{url} is not an http(s) URL"));
     }
+    let base = base.trim_end_matches('/').to_owned();
+    let models_url = models_url.or_else(|| chatgpt.is_some().then(|| chatgpt::models_url(&base)));
     Ok(Target {
         kind,
-        base: base.trim_end_matches('/').to_owned(),
+        base,
         models_url,
         key,
         headers,
     })
 }
 
+/// The key saved for `id`, or why there is none to read from `env`.
+fn saved_key(id: &str, env: &str, store: &AuthStore) -> Result<String, String> {
+    store
+        .api_credential(id)
+        .map(|credential| credential.raw_token().to_owned())
+        .ok_or_else(|| format!("no key: {env} is not set and no key is saved for {id}"))
+}
+
+/// The stored `ChatGPT` login, renewed first when it is about to expire
+/// (the renewal is saved, so the registry sees it too).
+fn chatgpt_login(store: &AuthStore) -> Option<auth::OAuthCredential> {
+    store
+        .credential(chatgpt::PROVIDER_ID)?
+        .is_oauth()
+        .then_some(())?;
+    let mut store = store.clone();
+    if let Ok(path) = AuthStore::default_path() {
+        let _ = chatgpt::ensure_fresh(&mut store, &path, chrono::Utc::now());
+    }
+    match store.credential(chatgpt::PROVIDER_ID) {
+        Some(auth::Credential::Oauth(login)) => Some(login.clone()),
+        _ => None,
+    }
+}
+
 /// The ids of the providers kage registers itself.
-const BUILTIN: [&str; 4] = ["anthropic", "google", "openai", "openai-responses"];
+const BUILTIN: [&str; 3] = ["anthropic", "google", "openai"];
 
 /// The environment variable provider `id` reads its key from: the
 /// config's, else the one kage knows for a registered provider, else
@@ -186,7 +225,7 @@ pub(super) fn provider_keys(config: &Config, store: &AuthStore) -> BTreeMap<Stri
                 KeySource::Unneeded
             } else if std::env::var(&env).is_ok_and(|value| !value.is_empty()) {
                 KeySource::Env
-            } else if store.access_token(id).is_some() {
+            } else if store.credential(id).is_some() {
                 KeySource::Auth
             } else {
                 KeySource::Missing
@@ -474,9 +513,10 @@ fn list_models(id: &str, target: &Target) -> ConfigTestResult {
 /// base wins; with no match, a sole entry is taken.
 fn parse_models(kind: Kind, json: &Value, base: &str) -> Option<Vec<ProbeModel>> {
     let mut models = match kind {
-        Kind::OpenAi | Kind::Anthropic => {
-            parse_envelope(json).or_else(|| parse_directory(json, base))
-        }
+        Kind::OpenAi => parse_envelope(json)
+            .or_else(|| parse_codex(json))
+            .or_else(|| parse_directory(json, base)),
+        Kind::Anthropic => parse_envelope(json).or_else(|| parse_directory(json, base)),
         Kind::Gemini => parse_gemini(json).or_else(|| parse_directory(json, base)),
     }?;
     models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -521,6 +561,34 @@ fn parse_envelope(json: &Value) -> Option<Vec<ProbeModel>> {
                     input,
                     produces,
                     efforts,
+                    ..ProbeModel::default()
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The `{"models": [...]}` listing of the `ChatGPT` backend, keyed by
+/// `slug`, without the models it hides from pickers. `None` when the
+/// answer has no such list.
+fn parse_codex(json: &Value) -> Option<Vec<ProbeModel>> {
+    Some(
+        json["models"]
+            .as_array()?
+            .iter()
+            .filter(|entry| entry["visibility"].as_str() != Some("hide"))
+            .filter_map(|entry| {
+                Some(ProbeModel {
+                    id: entry["slug"].as_str()?.to_owned(),
+                    name: entry["display_name"].as_str().map(str::to_owned),
+                    context: number_of(&entry["max_context_window"])
+                        .or_else(|| number_of(&entry["context_window"])),
+                    efforts: entry["supported_reasoning_levels"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|level| level["effort"].as_str().map(str::to_owned))
+                        .collect(),
                     ..ProbeModel::default()
                 })
             })
@@ -964,6 +1032,78 @@ mod tests {
         let result = super::probe_mcp("gone", &spec);
         assert!(!result.ok);
         assert!(!result.message.is_empty());
+    }
+
+    /// A store with only a `ChatGPT` login.
+    fn chatgpt_store() -> AuthStore {
+        let mut store = AuthStore::empty();
+        store.set_oauth(
+            "openai",
+            crate::auth::OAuthCredential {
+                access_token: "chatgpt-token".to_owned(),
+                account_id: Some("acc-1".to_owned()),
+                ..crate::auth::OAuthCredential::default()
+            },
+        );
+        store
+    }
+
+    /// With no key typed or exported, `openai` lists the backend's
+    /// models with the `ChatGPT` login and its headers.
+    #[test]
+    fn a_chatgpt_login_probes_the_backend_model_list() {
+        let probe = ProviderProbe {
+            id: "openai".to_owned(),
+            api_key_env: Some("KAGE_TEST_UNSET_OPENAI_KEY".to_owned()),
+            ..ProviderProbe::default()
+        };
+        let target = resolve(&probe, &Config::default(), &chatgpt_store()).unwrap();
+        assert_eq!(target.base, crate::chatgpt::BACKEND_BASE_URL);
+        assert_eq!(
+            target.models_url.as_deref(),
+            Some(crate::chatgpt::models_url(crate::chatgpt::BACKEND_BASE_URL).as_str())
+        );
+        assert_eq!(target.key, "chatgpt-token");
+        assert_eq!(target.headers["chatgpt-account-id"], "acc-1");
+        assert_eq!(target.headers["originator"], crate::chatgpt::ORIGINATOR);
+
+        let typed = ProviderProbe {
+            api_key: Some("sk-typed".to_owned()),
+            ..probe
+        };
+        let target = resolve(&typed, &Config::default(), &chatgpt_store()).unwrap();
+        assert_eq!(target.base, "https://api.openai.com/v1", "a typed key wins");
+
+        let keys = provider_keys(&Config::default(), &chatgpt_store());
+        assert!(matches!(
+            keys["openai"].source,
+            KeySource::Auth | KeySource::Env
+        ));
+    }
+
+    #[test]
+    fn the_backend_model_list_skips_hidden_models() {
+        let json = serde_json::json!({
+            "models": [
+                {
+                    "slug": "gpt-6-sol",
+                    "display_name": "GPT-6 Sol",
+                    "visibility": "list",
+                    "context_window": 400_000,
+                    "supported_reasoning_levels": [
+                        { "effort": "low", "description": "fast" },
+                        { "effort": "high", "description": "deep" },
+                    ],
+                },
+                { "slug": "internal", "visibility": "hide" },
+            ],
+        });
+        let models = super::parse_models(Kind::OpenAi, &json, "https://x").unwrap();
+        assert_eq!(models.len(), 1, "{models:?}");
+        assert_eq!(models[0].id, "gpt-6-sol");
+        assert_eq!(models[0].name.as_deref(), Some("GPT-6 Sol"));
+        assert_eq!(models[0].context, Some(400_000));
+        assert_eq!(models[0].efforts, ["low", "high"]);
     }
 
     #[test]

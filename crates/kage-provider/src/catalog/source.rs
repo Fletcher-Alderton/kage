@@ -50,10 +50,6 @@ impl ProviderMap {
 pub const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     ProviderMap::same("anthropic"),
     ProviderMap::same("openai"),
-    ProviderMap {
-        api_id: "openai",
-        kage_id: "openai-responses",
-    },
     ProviderMap::same("google"),
     ProviderMap::same("zai-coding-plan"),
     ProviderMap::same("zhipuai-coding-plan"),
@@ -222,9 +218,6 @@ pub fn prune(json: &str) -> Result<String, String> {
         if let Some(models) = provider.get_mut("models").and_then(Value::as_object_mut) {
             models.retain(|_, m| m.get("tool_call").and_then(Value::as_bool) == Some(true));
         }
-        // Several kage ids can share one catalog key (`openai` feeds
-        // both `openai` and `openai-responses`), so the key is kept
-        // once and `parse` reads it once per kage id.
         kept.insert(map.api_id.to_owned(), provider);
     }
     if kept.is_empty() {
@@ -478,19 +471,5 @@ mod tests {
         assert_eq!(value["kenari"]["models"]["k"]["id"], "k");
         assert_eq!(value["commandcode"]["models"]["c"]["id"], "c");
         assert!(value.get("unrelated").is_none(), "still prunes");
-    }
-
-    /// `prune` keeps a shared catalog key once, and `parse` still
-    /// serves it to both kage ids that read it.
-    #[test]
-    fn prune_serves_both_kage_ids_that_share_one_key() {
-        let body = with_providers(&[(
-            "openai",
-            r#"{"name": "OpenAI", "models": {"g": {"id": "g", "tool_call": true}}}"#,
-        )]);
-        let providers = parse(&prune(&body).unwrap()).unwrap();
-        let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
-        assert!(ids.contains(&"openai"), "{ids:?}");
-        assert!(ids.contains(&"openai-responses"), "{ids:?}");
     }
 }

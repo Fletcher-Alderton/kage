@@ -96,6 +96,7 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 ulid = { version = "3.0.0", features = ["serde"] }
 ureq = { version = "3.4.2", features = ["json"] }
 url = "2.5.8"
+zstd = { version = "0.14.3", default-features = false }
 
 [workspace.lints.clippy]
 missing_errors_doc = "allow"

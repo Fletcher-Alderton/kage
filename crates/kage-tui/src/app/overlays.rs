@@ -962,11 +962,11 @@ mod tests {
         };
         app.apply_settings_at(&value, Some(path.clone()));
         let cfg = kage_core::config::Config::load(&path).unwrap();
-        assert_eq!(cfg.ui.thinking_level.as_deref(), Some("max"));
+        assert_eq!(cfg.ui.thinking_level.as_deref(), Some("ultra"));
         assert!((cfg.loop_settings.compaction_threshold - 0.5).abs() < f32::EPSILON);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "# mine\n[ui]\nmouse = true\nthinking_level = \"max\"\n\n[loop]\ncompaction_threshold = 0.5\n"
+            "# mine\n[ui]\nmouse = true\nthinking_level = \"ultra\"\n\n[loop]\ncompaction_threshold = 0.5\n"
         );
         assert_eq!(
             lock(&app.options).get("compaction_threshold"),
@@ -974,7 +974,7 @@ mod tests {
         );
         assert_eq!(
             rx.try_recv(),
-            Ok(RunRequest::SetThinkingLevel("max".into()))
+            Ok(RunRequest::SetThinkingLevel("ultra".into()))
         );
     }
 }

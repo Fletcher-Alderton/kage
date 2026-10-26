@@ -33,7 +33,7 @@ use std::sync::Arc;
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_provider::{
     Provider, ProviderEvent, StreamRequest, anthropic::AnthropicProvider, gemini::GeminiProvider,
-    openai::OpenAiProvider,
+    openai_responses::OpenAiResponsesProvider,
 };
 
 fn main() {
@@ -44,7 +44,7 @@ fn main() {
 
     let provider: Arc<dyn Provider> = match provider_id.as_str() {
         "anthropic" => Arc::new(AnthropicProvider::new(must_env("ANTHROPIC_API_KEY"))),
-        "openai" => Arc::new(OpenAiProvider::new(must_env("OPENAI_API_KEY"))),
+        "openai" => Arc::new(OpenAiResponsesProvider::new(must_env("OPENAI_API_KEY"))),
         "gemini" => Arc::new(GeminiProvider::new(must_env("GEMINI_API_KEY"))),
         "zai" => compat_provider("zai").build(must_env("ZAI_API_KEY"), BTreeMap::new()),
         "zai-coding-plan" => {

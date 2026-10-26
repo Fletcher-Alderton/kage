@@ -116,7 +116,7 @@ value)` is the same as assigning.
 | `editor` | `ui.editor` | `"vim"` or `"modeless"` | `"modeless"` | immediately |
 | `input_min_lines` | `ui.input_min_lines` | integer, 1 to 64 | `1` | immediately |
 | `input_max_lines` | `ui.input_max_lines` | integer, 1 to 64 | `8` | immediately |
-| `thinking_level` | `ui.thinking_level` | `""`, `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"max"` | `""` | next session |
+| `thinking_level` | `ui.thinking_level` | `""`, `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` or `"ultra"` | `""` | next session |
 | `transcript_on_exit` | `ui.transcript_on_exit` | `"full"`, `"last"` or `"none"` | `"full"` | at exit |
 | `compaction_threshold` | `loop.compaction_threshold` | number, 0 to 1 (0 turns compaction off) | `0.8` | next session |
 | `leader` | `keybindings.leader` | one key, such as `","` or `"<Space>"` | `"\\"` (backslash) | mappings set after it |
@@ -126,7 +126,7 @@ value)` is the same as assigning.
 | `swarm_max_items` | `agents.swarm_max_items` | integer, 2 to 128 | `32` | at startup |
 | `swarm_timeout_ms` | `agents.swarm_timeout_ms` | integer milliseconds, 1,000 to 86,400,000 | `7200000` | at startup |
 | `agent_model` | `agents.model` | `"provider/model"` or `"inherit"` | `"inherit"` | at startup |
-| `agent_thinking` | `agents.thinking` | `"inherit"`, `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"max"` | `"inherit"` | at startup |
+| `agent_thinking` | `agents.thinking` | `"inherit"`, `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` or `"ultra"` | `"inherit"` | at startup |
 | `agent_max_turns` | `agents.max_turns` | integer, 0 to 10,000 (0 for no limit) | `0` | at startup |
 | `agent_timeout` | `agents.timeout` | integer seconds, 0 to 86,400 (0 for no limit) | `0` | at startup |
 | `agent_budget` | `agents.budget` | integer tokens, 0 to 1,000,000,000 (0 for no limit) | `0` | at startup |

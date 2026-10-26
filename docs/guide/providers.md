@@ -9,22 +9,30 @@ under `[providers.custom.*]`.
 
 ## built-in providers
 
-| id                 | provider            | credential env      |
-| ------------------ | ------------------- | ------------------- |
-| `anthropic`        | Anthropic           | `ANTHROPIC_API_KEY` |
-| `openai`           | OpenAI              | `OPENAI_API_KEY`    |
-| `openai-responses` | OpenAI Responses API | `OPENAI_API_KEY`   |
-| `google`           | Google Gemini       | `GEMINI_API_KEY`    |
-| `acp`              | external ACP agents | -                   |
+| id          | provider            | credential env      |
+| ----------- | ------------------- | ------------------- |
+| `anthropic` | Anthropic           | `ANTHROPIC_API_KEY` |
+| `openai`    | OpenAI              | `OPENAI_API_KEY`    |
+| `google`    | Google Gemini       | `GEMINI_API_KEY`    |
+| `acp`       | external ACP agents | -                   |
 
-`openai-responses` serves `openai-responses:<model>` addressing on top
-of the same OpenAI credential, and `kage auth login openai` covers both.
-On the Responses API a model draws by calling OpenAI's hosted image
-tool, which runs at OpenAI and is billed on its own. kage offers it
-only when asked:
+`openai` speaks OpenAI's Responses API. `kage auth login openai` offers
+two ways in: an API key, or a ChatGPT sign-in that serves the same
+models from your ChatGPT plan instead of API billing. An exported
+`OPENAI_API_KEY` wins over a saved sign-in.
+
+With the ChatGPT sign-in, `openai` offers the models your plan may use,
+as ChatGPT's own model list reports them, with the largest context
+window it accepts and no per-token cost. kage saves that list in
+`~/.cache/kage/chatgpt-models.json` when you sign in, and
+`kage models refresh` updates it. Without it, the catalog's OpenAI
+models are offered instead.
+
+A model draws by calling OpenAI's hosted image tool, which runs at
+OpenAI and is billed on its own. kage offers it only when asked:
 
 ```toml
-[providers.openai-responses]
+[providers.openai]
 image_generation = true
 ```
 `acp` is not an HTTP provider and cannot be overridden here. Its agents
@@ -327,7 +335,7 @@ since kage has no catalog entry for it:
 - `reasoning`: `false` for a model that does not think, which sends no
   thinking setting. `true` offers every level.
 - `efforts`: the effort values the model takes (`none`, `minimal`,
-  `low`, `medium`, `high`, `xhigh`, `max`). Implies `reasoning = true`
+  `low`, `medium`, `high`, `xhigh`, `max`, `ultra`). Implies `reasoning = true`
   and limits the levels to these.
 - `input`: the kinds of input the model takes. Attaching an image to a
   model whose `input` leaves out `image` warns, and the image is not
@@ -380,7 +388,7 @@ run.
 ## thinking
 
 A session's thinking level is one of `off`, `minimal`, `low`,
-`medium`, `high`, `xhigh` and `max`, or automatic. Automatic is the default:
+`medium`, `high`, `xhigh`, `max` and `ultra`, or automatic. Automatic is the default:
 it sends `high`, or the nearest level the model accepts when it has no
 `high` (the higher one on a tie). A level you choose with
 `alt+t`, the settings dialog or `[ui] thinking_level` is fitted the
@@ -443,7 +451,7 @@ protocol-specific path. What "root" means depends on `kind`:
 | `anthropic`| `<base>/v1/messages`                                  | the host root, e.g. `https://relay.internal` |
 | `gemini`   | `<base>/v1beta/models/<model>:streamGenerateContent`  | the host root, e.g. `https://generativelanguage.googleapis.com` |
 
-The built-in `openai-responses` provider follows the `openai` rule with
+The built-in `openai` provider follows the `openai` rule with
 `<base>/responses`. API keys travel in request headers (`x-api-key`,
 `Authorization`, `x-goog-api-key`), never in the URL.
 
@@ -454,7 +462,7 @@ startup with exit status 1:
 
 - A custom id must be non-empty lowercase letters, digits, or dashes.
 - A custom id must not be a built-in id (`acp`, `anthropic`,
-  `google`, `openai`, `openai-responses`). Override those providers
+  `google`, `openai`). Override those providers
   with `[providers.<id>]` instead, and do the same for a catalog
   provider rather than reusing its id.
 - A custom provider must declare at least one model.

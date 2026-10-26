@@ -221,7 +221,7 @@ fn from_frontmatter(
         None => None,
         Some(level) => Some(ThinkingLevel::parse(level).ok_or_else(|| {
             format!(
-                "thinking {level:?} is not one of off, minimal, low, medium, high, xhigh, max or inherit"
+                "thinking {level:?} is not one of off, minimal, low, medium, high, xhigh, max, ultra or inherit"
             )
         })?),
     };

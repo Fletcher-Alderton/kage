@@ -724,7 +724,7 @@ pub struct CustomProviderModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<bool>,
     /// Effort values the model accepts (`none`, `minimal`, `low`,
-    /// `medium`, `high`, `xhigh`, `max`). Implies `reasoning = true`
+    /// `medium`, `high`, `xhigh`, `max`, `ultra`). Implies `reasoning = true`
     /// and limits the levels to these.
     #[serde(default, skip_serializing_if = "Efforts::is_empty")]
     pub efforts: Efforts,
@@ -782,7 +782,7 @@ pub struct BuiltinProviderOverride {
     /// Extra HTTP headers sent on every request to this provider.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    /// `openai-responses` only: offer `OpenAI`'s hosted image tool to
+    /// `openai` only: offer `OpenAI`'s hosted image tool to
     /// every model, so a model can answer with images. The tool runs at
     /// `OpenAI` and is billed on its own, so it is off unless set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -817,7 +817,7 @@ pub struct UiConfig {
     pub input_max_lines: u16,
     /// Default thinking level for new sessions: one of the
     /// `ThinkingLevel` ladder strings (`off`, `minimal`, `low`,
-    /// `medium`, `high`, `xhigh`, `max`). Unset means automatic: high, or the
+    /// `medium`, `high`, `xhigh`, `max`, `ultra`). Unset means automatic: high, or the
     /// nearest level the model accepts. Parsed and seeded at session
     /// start; the Shift+Tab cycle still overrides it per session. Kept
     /// as a raw string so the option registry can validate it.
@@ -2240,14 +2240,8 @@ default = "ask"   # keep asking
         };
         providers
             .validate(
-                &["acp", "anthropic", "openai", "openai-responses", "google"],
-                &[
-                    "anthropic",
-                    "openai",
-                    "openai-responses",
-                    "google",
-                    "deepseek",
-                ],
+                &["acp", "anthropic", "openai", "google"],
+                &["anthropic", "openai", "google", "deepseek"],
             )
             .expect("well-formed providers validate");
     }

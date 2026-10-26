@@ -548,7 +548,7 @@
 ---@field input_min_lines integer Minimum content rows of the input box.
 ---@field input_max_lines integer Content rows the input box grows to before it scrolls.
 ---@field transcript_on_exit "full"|"last"|"none" What prints after exit: the whole transcript, from the last prompt on, or only the session path and a resume hint.
----@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max" Thinking level for new sessions, or empty for auto (high, or the nearest level the model accepts).
+---@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|"ultra" Thinking level for new sessions, or empty for auto (high, or the nearest level the model accepts).
 ---@field compaction_threshold number Fraction of the context window that triggers compaction. 0 turns compaction off.
 ---@field leader string The key `<leader>` expands to when a mapping is set.
 ---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.
@@ -557,7 +557,7 @@
 ---@field swarm_max_items integer Most items one swarm call may run, one child agent per item.
 ---@field swarm_timeout_ms integer Milliseconds one swarm child may run, measured from its run start (not while queued). On deadline the child is cancelled and renders as cancelled in the aggregate.
 ---@field agent_model string Model agents run, as provider/model, when neither the call nor the agent's definition names one. `inherit` uses the parent's current model.
----@field agent_thinking "inherit"|"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max" Thinking level agents run with when neither the call nor the agent's definition names one. `inherit` uses the parent's current level.
+---@field agent_thinking "inherit"|"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|"ultra" Thinking level agents run with when neither the call nor the agent's definition names one. `inherit` uses the parent's current level.
 ---@field agent_max_turns integer Turns one agent run may take. The agent gets one warning turn to reply, then stops. 0 means no limit.
 ---@field agent_timeout integer Seconds one agent run may take before it is stopped. 0 means no limit.
 ---@field agent_budget integer Tokens (input plus output) all agents of a session may use between two of your prompts. Past it, they stop. 0 means no limit.

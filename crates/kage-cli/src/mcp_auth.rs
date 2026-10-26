@@ -254,6 +254,7 @@ fn credential(tokens: oauth::Tokens) -> OAuthCredential {
         refresh_token: tokens.refresh_token,
         expires_at: tokens.expires_at.map(DateTime::<Utc>::from),
         scope: tokens.scope,
+        account_id: None,
     }
 }
 
@@ -311,13 +312,7 @@ pub(crate) fn login(
     eprintln!("kage: authorize kage for MCP server `{name}` in your browser:\n");
     eprintln!("  {authorize}\n");
     open(&authorize);
-    eprintln!(
-        "kage: waiting for the browser to return ({} minutes).",
-        oauth::LOGIN_TIMEOUT.as_secs() / 60
-    );
-    eprintln!("kage: on another machine? paste the URL your browser was sent to and press Enter:");
-    eprint!("> ");
-    let _ = io::stderr().flush();
+    prompt_for_redirect();
     let code = wait_for_code(loopback, &expected, pasted, cancel).map_err(|e| e.to_string())?;
     let tokens = oauth::exchange(&discovery, &client_id, &redirect_uri, &code, &pkce)
         .map_err(|e| e.to_string())?;
@@ -337,11 +332,24 @@ pub(crate) fn login(
     Ok(())
 }
 
+/// Say how long the login waits and offer the paste for a browser on
+/// another machine, leaving the cursor on the paste prompt that
+/// [`wait_for_code`] reads.
+pub(crate) fn prompt_for_redirect() {
+    eprintln!(
+        "kage: waiting for the browser to return ({} minutes).",
+        oauth::LOGIN_TIMEOUT.as_secs() / 60
+    );
+    eprintln!("kage: on another machine? paste the URL your browser was sent to and press Enter:");
+    eprint!("> ");
+    let _ = io::stderr().flush();
+}
+
 /// The first of the browser's redirect and a pasted one, or
 /// [`OAuthError::Cancelled`] once `cancel` is set. Blank lines are
 /// ignored, and a closed input leaves only the browser. When the
 /// browser wins or the wait is cancelled, the prompt line is ended.
-fn wait_for_code(
+pub(crate) fn wait_for_code(
     loopback: Loopback,
     expected: &Expected,
     pasted: &Receiver<String>,
@@ -699,6 +707,7 @@ mod tests {
                 refresh_token: Some("refresh-old".to_owned()),
                 expires_at: Some(Utc::now() + chrono::Duration::seconds(expires_in)),
                 scope: None,
+                account_id: None,
             },
         }
     }

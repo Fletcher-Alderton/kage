@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Unified thinking effort the host requests for one turn.
 ///
-/// A seven-step ladder the user cycles through with `Shift+Tab`. [`Reasoning::resolve`] fits a level to
+/// An eight-step ladder the user cycles through with `Shift+Tab`. [`Reasoning::resolve`] fits a level to
 /// what the model accepts, and providers translate it to their shape
 /// (an effort value, a thinking token budget, or an on/off switch).
 ///
@@ -32,14 +32,16 @@ pub enum ThinkingLevel {
     /// effort list; budget-based providers allocate a large tier.
     #[serde(rename = "xhigh")]
     XHigh,
-    /// The most the model offers: its `max` effort, or the largest
-    /// budget tier.
+    /// The model's `max` effort, or the largest budget tier.
     Max,
+    /// The `ultra` effort above `max`. Budget-based models stop at
+    /// [`Self::Max`].
+    Ultra,
 }
 
 impl ThinkingLevel {
     /// Every level, lowest first.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Off,
         Self::Minimal,
         Self::Low,
@@ -47,6 +49,7 @@ impl ThinkingLevel {
         Self::High,
         Self::XHigh,
         Self::Max,
+        Self::Ultra,
     ];
 
     /// The level after `current` in `levels` (lowest first), wrapping to
@@ -75,6 +78,7 @@ impl ThinkingLevel {
             Self::High => "high",
             Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 
@@ -99,6 +103,7 @@ impl ThinkingLevel {
             "high" => Some(Self::High),
             "xhigh" => Some(Self::XHigh),
             "max" => Some(Self::Max),
+            "ultra" => Some(Self::Ultra),
             _ => None,
         }
     }
@@ -112,8 +117,9 @@ impl ThinkingLevel {
 
     /// Map the level to an `OpenAI` `reasoning_effort` string for a
     /// model without a catalog effort list. Returns `None` for
-    /// [`Self::Off`] (caller should omit the field). `XHigh` and `Max`
-    /// collapse to `"high"`, the largest value every such model takes.
+    /// [`Self::Off`] (caller should omit the field). `XHigh`, `Max`
+    /// and `Ultra` collapse to `"high"`, the largest value every such
+    /// model takes.
     #[must_use]
     pub fn openai_reasoning_effort(self) -> Option<&'static str> {
         match self {
@@ -121,7 +127,7 @@ impl ThinkingLevel {
             Self::Minimal => Some("minimal"),
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
-            Self::High | Self::XHigh | Self::Max => Some("high"),
+            Self::High | Self::XHigh | Self::Max | Self::Ultra => Some("high"),
         }
     }
 
@@ -137,7 +143,7 @@ impl ThinkingLevel {
             Self::Medium => Some(8_192),
             Self::High => Some(16_384),
             Self::XHigh => Some(32_768),
-            Self::Max => Some(65_536),
+            Self::Max | Self::Ultra => Some(65_536),
         }
     }
 }
@@ -162,13 +168,15 @@ pub enum Effort {
     High,
     /// Heavier than high.
     XHigh,
-    /// The largest effort.
+    /// Heavier than xhigh.
     Max,
+    /// The largest effort, above max.
+    Ultra,
 }
 
 impl Effort {
     /// Every effort, lowest first.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::None,
         Self::Minimal,
         Self::Low,
@@ -176,6 +184,7 @@ impl Effort {
         Self::High,
         Self::XHigh,
         Self::Max,
+        Self::Ultra,
     ];
 
     /// Wire value, such as `"xhigh"`.
@@ -189,6 +198,7 @@ impl Effort {
             Self::High => "high",
             Self::XHigh => "xhigh",
             Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 
@@ -244,6 +254,7 @@ impl Efforts {
             ThinkingLevel::High => Effort::High,
             ThinkingLevel::XHigh => Effort::XHigh,
             ThinkingLevel::Max => Effort::Max,
+            ThinkingLevel::Ultra => Effort::Ultra,
         };
         self.contains(wanted).then_some(wanted)
     }
@@ -320,7 +331,9 @@ impl Reasoning {
             Self::Effort { efforts, toggle } => all
                 .filter(|l| (l.is_off() && toggle) || efforts.for_level(*l).is_some())
                 .collect(),
-            Self::Budget { toggle, .. } => all.filter(|l| toggle || !l.is_off()).collect(),
+            Self::Budget { toggle, .. } => all
+                .filter(|l| (toggle || !l.is_off()) && *l != ThinkingLevel::Ultra)
+                .collect(),
         }
     }
 
@@ -473,7 +486,7 @@ mod tests {
         );
     }
 
-    use ThinkingLevel::{High, Low, Max, Medium, Minimal, Off, XHigh};
+    use ThinkingLevel::{High, Low, Max, Medium, Minimal, Off, Ultra, XHigh};
 
     fn effort(values: &[Effort], toggle: bool) -> Reasoning {
         Reasoning::Effort {
@@ -555,6 +568,31 @@ mod tests {
         assert_eq!(r.budget(XHigh), Some(24_576));
         assert_eq!(r.budget(Off), None);
         assert!(!r.levels().contains(&Off));
+    }
+
+    /// `ultra` is a named effort only: an effort model that lists it
+    /// offers it, and a budget model tops out at `max`.
+    #[test]
+    fn ultra_is_offered_only_by_effort_models() {
+        let codex = effort(&[Effort::Low, Effort::Max, Effort::Ultra], false);
+        assert_eq!(codex.levels(), vec![Low, Max, Ultra]);
+        assert_eq!(codex.effort(Ultra), Some(Effort::Ultra));
+        assert_eq!(codex.resolve(Some(Ultra)), Some(Ultra));
+        assert_eq!(
+            effort(&[Effort::Max], false).resolve(Some(Ultra)),
+            Some(Max)
+        );
+
+        let budget = Reasoning::Budget {
+            min: 1024,
+            max: None,
+            toggle: true,
+        };
+        assert_eq!(budget.levels().last(), Some(&Max));
+        assert_eq!(budget.resolve(Some(Ultra)), Some(Max));
+
+        assert_eq!(ThinkingLevel::parse("ultra"), Some(Ultra));
+        assert_eq!(Effort::parse("ultra"), Some(Effort::Ultra));
     }
 
     #[test]

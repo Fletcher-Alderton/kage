@@ -4,13 +4,12 @@ use std::sync::Arc;
 
 use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai, openai_responses};
 
-use crate::{acp_glue, auth, state};
+use crate::{acp_glue, auth, chatgpt, state};
 
 /// Builtin provider ids `kage -m <id>:<model>` can address directly.
 /// `acp` is listed because it is a valid `-m` prefix, but it is not
 /// overridable: its configuration lives under `[acp.*]`.
-pub(crate) const BUILTIN_PROVIDER_IDS: &[&str] =
-    &["acp", "anthropic", "google", "openai", "openai-responses"];
+pub(crate) const BUILTIN_PROVIDER_IDS: &[&str] = &["acp", "anthropic", "google", "openai"];
 
 /// Provider ids whose `[providers.<id>]` override kage honours: every
 /// builtin except `acp`, plus each OpenAI-compatible catalog entry.
@@ -58,9 +57,16 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
     static WARN_REPLACED: std::sync::Once = std::sync::Once::new();
     let config = kage_core::config::Config::load_default().map_err(|e| e.to_string())?;
     validate_providers(&config.providers)?;
-    let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
+    let mut store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
+    // A ChatGPT login close to expiry renews before the registry
+    // builds, so requests start with a token that lasts. A failed
+    // renewal stays silent here: the 401 path surfaces it when a
+    // token is actually needed.
+    if let Ok(path) = auth::AuthStore::default_path() {
+        let _ = chatgpt::ensure_fresh(&mut store, &path, chrono::Utc::now());
+    }
     let mut registry = ProviderRegistry::new();
-    register_openai_family(&config, &store, &mut registry);
+    register_openai(&config, &store, &env_key, &mut registry);
     register_compat_providers(&config, &store, &mut registry);
     let replaced = register_custom_providers(&config, &store, &mut registry);
     WARN_REPLACED.call_once(|| {
@@ -115,54 +121,94 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
     Ok(registry)
 }
 
-/// Register the `openai` and `openai-responses` providers, which
-/// share one credential: `kage auth login openai` stores a single
-/// entry both use.
-fn register_openai_family(
+/// Register the built-in `openai` provider on the Responses API. An
+/// exported or saved API key serves it from the public API; otherwise a
+/// `ChatGPT` login (an OAuth record under `openai`) serves it from the
+/// `ChatGPT` backend. `env` reads an environment variable, so tests
+/// need not set one.
+fn register_openai(
     config: &kage_core::config::Config,
     store: &auth::AuthStore,
+    env: &dyn Fn(&str) -> Option<String>,
     registry: &mut ProviderRegistry,
 ) {
     let ov = config.providers.overrides.get("openai");
-    let env = ov
+    let env_name = ov
         .and_then(|o| o.api_key_env.as_deref())
         .unwrap_or_else(|| auth::env_var_for("openai"));
-    let Some(key) = lookup_key_with_env("openai", env, store) else {
+    // An exported key wins over a stored login, matching the
+    // env-first lookup everywhere else.
+    let stored_key = match store.credential("openai") {
+        Some(auth::Credential::ApiKey { key }) => Some(key.clone()),
+        _ => None,
+    };
+    if let Some(key) = env(env_name).or(stored_key) {
+        let mut provider = match ov.and_then(|o| o.base_url.clone()) {
+            Some(base) => openai_responses::OpenAiResponsesProvider::with_base_url(key, base),
+            None => openai_responses::OpenAiResponsesProvider::new(key),
+        };
+        if let Some(o) = ov {
+            provider = provider
+                .with_image_generation(o.image_generation)
+                .with_extra_headers(o.headers.clone());
+        }
+        registry.register(Arc::new(provider));
         return;
-    };
-    let mut provider = match ov.and_then(|o| o.base_url.clone()) {
-        Some(base) => openai::OpenAiProvider::with_base_url(&key, base),
-        None => openai::OpenAiProvider::new(&key),
-    };
-    if let Some(o) = ov
-        && !o.headers.is_empty()
+    }
+    if let Some(auth::Credential::Oauth(oauth)) = store.credential("openai")
+        && let Ok(path) = auth::AuthStore::default_path()
     {
-        provider = provider.with_extra_headers(o.headers.clone());
+        register_chatgpt(config, oauth, path, registry);
+    }
+}
+
+/// The non-empty value of environment variable `name`, if set; `None`
+/// for an empty name.
+fn env_key(name: &str) -> Option<String> {
+    (!name.is_empty())
+        .then(|| std::env::var(name).ok())
+        .flatten()
+        .filter(|v| !v.is_empty())
+}
+
+/// `openai` on the `ChatGPT` backend with a renewable
+/// [`chatgpt::ChatGptBearer`] over the auth store at `path`, in the
+/// backend's request shape, offering the plan's cached models. Override
+/// headers merge after the backend's own, so a proxy can add to them.
+/// Bodies are zstd-compressed only on the backend itself, as the Codex
+/// CLI does, since a proxy in between may not decode them.
+fn register_chatgpt(
+    config: &kage_core::config::Config,
+    oauth: &auth::OAuthCredential,
+    path: std::path::PathBuf,
+    registry: &mut ProviderRegistry,
+) {
+    let ov = config.providers.overrides.get("openai");
+    let mut headers = chatgpt::backend_headers(oauth.account_id.as_deref());
+    if let Some(o) = ov {
+        for (name, value) in &o.headers {
+            headers.insert(name.clone(), value.clone());
+        }
+    }
+    let mut provider = match ov.and_then(|o| o.base_url.clone()) {
+        Some(base) => openai_responses::OpenAiResponsesProvider::with_base_url("", base),
+        None => {
+            openai_responses::OpenAiResponsesProvider::with_base_url("", chatgpt::BACKEND_BASE_URL)
+                .with_zstd_bodies()
+        }
+    }
+    .with_bearer(Arc::new(chatgpt::ChatGptBearer::new(oauth, path)))
+    .with_extra_headers(headers)
+    .with_models(
+        chatgpt::models_cache_path()
+            .map(|cache| chatgpt::cached_models(&cache))
+            .unwrap_or_default(),
+    )
+    .for_chatgpt_backend();
+    if let Some(o) = ov {
+        provider = provider.with_image_generation(o.image_generation);
     }
     registry.register(Arc::new(provider));
-    // The Responses API shares OpenAI auth: any user with an OpenAI
-    // key automatically gets `openai-responses:` model addressing. An
-    // `api_key_env` on the `openai-responses` override redirects just
-    // this provider's env lookup; otherwise the OpenAI key is reused.
-    let rov = config.providers.overrides.get("openai-responses");
-    let response_key = rov
-        .and_then(|o| o.api_key_env.as_deref())
-        .filter(|env| !env.is_empty())
-        .and_then(|env| lookup_key_with_env("openai-responses", env, store))
-        .unwrap_or_else(|| key.clone());
-    let mut responses = match rov.and_then(|o| o.base_url.clone()) {
-        Some(base) => openai_responses::OpenAiResponsesProvider::with_base_url(response_key, base),
-        None => openai_responses::OpenAiResponsesProvider::new(response_key),
-    };
-    if let Some(o) = rov {
-        responses = responses.with_image_generation(o.image_generation);
-    }
-    if let Some(o) = rov
-        && !o.headers.is_empty()
-    {
-        responses = responses.with_extra_headers(o.headers.clone());
-    }
-    registry.register(Arc::new(responses));
 }
 
 /// Register each OpenAI-compatible catalog entry the user has a key
@@ -271,9 +317,11 @@ fn is_catalog_provider(id: &str) -> bool {
 }
 
 /// Look up `provider`'s bearer credential from `env_var` (when
-/// non-empty and set), falling back to the auth store. Returns the API
-/// key string for [`auth::Credential::ApiKey`] entries and the access
-/// token for [`auth::Credential::Oauth`] entries. `env_var` defaults to
+/// non-empty and set), falling back to the stored credential its public
+/// API accepts ([`auth::AuthStore::api_credential`], so a `ChatGPT`
+/// login never stands in for an `OpenAI` API key). Returns the API key
+/// string for [`auth::Credential::ApiKey`] entries and the access token
+/// for [`auth::Credential::Oauth`] entries. `env_var` defaults to
 /// [`auth::env_var_for`]'s name for the provider; `[providers.<id>]`
 /// `api_key_env` overrides can redirect the lookup.
 pub(crate) fn lookup_key_with_env(
@@ -281,13 +329,11 @@ pub(crate) fn lookup_key_with_env(
     env_var: &str,
     store: &auth::AuthStore,
 ) -> Option<String> {
-    if !env_var.is_empty()
-        && let Ok(v) = std::env::var(env_var)
-        && !v.is_empty()
-    {
-        return Some(v);
-    }
-    store.access_token(provider).map(str::to_owned)
+    env_key(env_var).or_else(|| {
+        store
+            .api_credential(provider)
+            .map(|c| c.raw_token().to_owned())
+    })
 }
 
 /// Printed when no provider other than `acp` is registered and the
@@ -411,6 +457,143 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    /// A server that answers one streaming request and hands back its
+    /// request head. The body is read in full before the answer, since
+    /// Windows resets a connection closed with unread data.
+    fn capture_one() -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 8192];
+            let head_end = loop {
+                if let Some(at) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            };
+            let head = String::from_utf8_lossy(&raw[..head_end]).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse().unwrap());
+            while raw.len() < head_end + length {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            conn.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\n",
+            )
+            .unwrap();
+            String::from_utf8_lossy(&raw).to_lowercase()
+        });
+        (addr, server)
+    }
+
+    /// Stream one turn through `model` of `registry`.
+    fn stream_once(registry: &ProviderRegistry, model: &str) {
+        let resolved = registry.resolve(model).unwrap();
+        let req = kage_provider::StreamRequest::new(
+            resolved.model.clone(),
+            vec![Arc::new(kage_core::Message::new(
+                kage_core::Role::User,
+                vec![kage_core::Content::Text { text: "hi".into() }],
+                None,
+            ))],
+        );
+        let events: Vec<_> = resolved
+            .provider
+            .stream(req, &kage_core::CancelFlag::new())
+            .unwrap()
+            .collect();
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+    }
+
+    /// A store holding only a `ChatGPT` login.
+    fn chatgpt_store() -> auth::AuthStore {
+        let mut store = auth::AuthStore::empty();
+        store.set_oauth(
+            "openai",
+            auth::OAuthCredential {
+                access_token: "chatgpt-token".to_owned(),
+                refresh_token: Some("refresh".to_owned()),
+                expires_at: None,
+                scope: None,
+                account_id: Some("acc-9".to_owned()),
+            },
+        );
+        store
+    }
+
+    /// A `ChatGPT` login registers `openai` pointed at the `ChatGPT`
+    /// backend, with the renewable bearer and the backend headers the
+    /// public client sends. A proxy base URL gets plain bodies.
+    #[test]
+    fn a_chatgpt_login_routes_openai_through_the_backend() {
+        let (addr, server) = capture_one();
+        let config: kage_core::config::Config = toml::from_str(&format!(
+            r#"
+            [providers.openai]
+            base_url = "http://{addr}/backend-api/codex"
+            "#
+        ))
+        .unwrap();
+        let mut registry = ProviderRegistry::new();
+        register_openai(&config, &chatgpt_store(), &|_| None, &mut registry);
+        stream_once(&registry, "openai/gpt-5.2");
+        let request = server.join().unwrap();
+        assert!(
+            request.starts_with("post /backend-api/codex/responses "),
+            "{request}"
+        );
+        for header in [
+            "openai-beta: responses=experimental",
+            "originator: codex_cli_rs",
+            "chatgpt-account-id: acc-9",
+            "authorization: bearer chatgpt-token",
+        ] {
+            assert!(request.contains(&format!("\r\n{header}\r\n")), "{request}");
+        }
+        assert!(!request.contains("content-encoding"), "{request}");
+        assert!(request.ends_with('}'), "the whole body was read: {request}");
+    }
+
+    /// Key lookups (the image tool's among them) never hand a `ChatGPT`
+    /// token to the public `OpenAI` API.
+    #[test]
+    fn a_chatgpt_login_is_no_openai_api_key() {
+        assert_eq!(lookup_key_with_env("openai", "", &chatgpt_store()), None);
+    }
+
+    /// An exported `OpenAI` key wins over a stored `ChatGPT` login and
+    /// serves `openai` from the public Responses API.
+    #[test]
+    fn an_exported_key_wins_over_a_chatgpt_login() {
+        let (addr, server) = capture_one();
+        let config: kage_core::config::Config = toml::from_str(&format!(
+            r#"
+            [providers.openai]
+            base_url = "http://{addr}/v1"
+            "#
+        ))
+        .unwrap();
+        let env = |name: &str| (name == "OPENAI_API_KEY").then(|| "sk-1".to_owned());
+        let mut registry = ProviderRegistry::new();
+        register_openai(&config, &chatgpt_store(), &env, &mut registry);
+        stream_once(&registry, "openai/gpt-5.2");
+        let request = server.join().unwrap();
+        assert!(request.starts_with("post /v1/responses "), "{request}");
+        assert!(
+            request.contains("\r\nauthorization: bearer sk-1\r\n"),
+            "{request}"
+        );
+        assert!(!request.contains("chatgpt-account-id"), "{request}");
+    }
 
     #[test]
     fn custom_anthropic_and_gemini_providers_register_under_their_own_ids() {
@@ -857,7 +1040,7 @@ mod tests {
     /// The builtins are not compat entries but resolve the same way.
     #[test]
     fn every_builtin_resolves_a_default_model() {
-        for id in ["anthropic", "openai", "openai-responses", "google"] {
+        for id in ["anthropic", "openai", "google"] {
             let registry = ProviderRegistry::new().with(stub(id, &[]));
             assert!(
                 fallback_model(&registry).starts_with(&format!("{id}/")),
@@ -873,16 +1056,6 @@ mod tests {
     fn providers_follow_the_catalog_order() {
         let registry = compat_registry(&["xiaomi", "groq"]);
         assert!(fallback_model(&registry).starts_with("groq/"));
-    }
-
-    /// `openai-responses` shares `openai`'s credential, so a user with
-    /// one key must land on `openai`, not the Responses API.
-    #[test]
-    fn openai_wins_over_openai_responses_on_the_same_credential() {
-        let registry = ProviderRegistry::new()
-            .with(stub("openai-responses", &[]))
-            .with(stub("openai", &[]));
-        assert!(fallback_model(&registry).starts_with("openai/"));
     }
 
     /// The Z.AI coding plans outrank the pay-as-you-go `zai` endpoint.

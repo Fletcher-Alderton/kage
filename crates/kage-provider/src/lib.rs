@@ -7,6 +7,7 @@
 //! is no tokio, no async-trait, and no `Pin<Box<dyn Stream>>`.
 
 pub mod anthropic;
+pub mod bearer;
 pub mod cancelable;
 pub mod catalog;
 pub mod compat;
@@ -27,6 +28,7 @@ pub mod sse;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use bearer::{BearerSource, SharedBearer};
 pub use cancelable::{cancellable_call, make_cancelable};
 pub use catalog::{ModelInfo, ProviderInfo};
 pub use error::ProviderError;

@@ -72,13 +72,13 @@ pub struct OptionDef {
 /// Values [`OptionKind::Choice`] accepts for `thinking_level`: the
 /// thinking ladder, or empty for the automatic level.
 const THINKING_LEVELS: &[&str] = &[
-    "", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+    "", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
 /// Values [`OptionKind::Choice`] accepts for `agent_thinking`: the
 /// thinking ladder, or `inherit` for the parent's level.
 const AGENT_THINKING_LEVELS: &[&str] = &[
-    "inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+    "inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
 /// Every option.

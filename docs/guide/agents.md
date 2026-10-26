@@ -319,7 +319,7 @@ Saved as `~/.config/kage/agents/reviewer.md`, this defines the agent
 | `description` | yes | What the agent is for, at most 1024 characters. The model picks agents by it, so say when to use this one and what to give it. |
 | `tools` | no | A comma list of tool names. Without it the agent gets every tool its parent has. With it, the agent may start agents, swarms or send messages only when the list names `agent`, `swarm` or `send_message`. A listed name that matches no tool of the parent shows a warning when the agent starts. |
 | `model` | no | The model, as `provider/model`, or `inherit` (the default) for the parent's current model. A model that is not available fails the agent's run. An `agent` or `swarm` call's `model` overrides this. |
-| `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `inherit` (the default) for the parent's current level. The level is fitted to the agent's model like the main session's. A call's `thinking` overrides this. |
+| `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra`, or `inherit` (the default) for the parent's current level. The level is fitted to the agent's model like the main session's. A call's `thinking` overrides this. |
 | `max_turns` | no | Turns with tool calls one run may take, a positive integer. `maxTurns` works too. Without it, `agent_max_turns` applies (see [limits](#limits)). |
 | `timeout` | no | How long one run may take: seconds (`90`), or a number with `s`, `m` or `h` (`90s`, `10m`, `1h`). Without it, `agent_timeout` applies. |
 | `isolation` | no | `none` (the default) or `worktree`, which gives the agent a checkout of its own (see [worktree agents](#worktree-agents)). |

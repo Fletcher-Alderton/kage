@@ -193,7 +193,7 @@ impl SwarmTool {
                 },
                 "thinking": {
                     "type": "string",
-                    "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+                    "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
                     "description": "Thinking level for every new child. Overrides the agent definition's thinking. Resumed children keep their own."
                 }
             },

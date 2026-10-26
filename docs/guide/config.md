@@ -37,7 +37,7 @@ editor = "modeless"
 input_min_lines = 1
 input_max_lines = 8
 # default thinking level for new sessions: off, minimal, low,
-# medium, high, xhigh, or max. left unset, kage uses high, or the nearest
+# medium, high, xhigh, max, or ultra. left unset, kage uses high, or the nearest
 # level the model accepts, and shows it as "high (auto)". alt+t
 # still cycles it per session.
 # thinking_level = "medium"
@@ -132,8 +132,8 @@ swarm_timeout_ms = 7200000
 # definition names one, as provider/model. "inherit" uses the parent's.
 model = "inherit"
 # thinking level agents run with when neither the call nor the
-# definition names one: inherit, off, minimal, low, medium, high, xhigh
-# or max.
+# definition names one: inherit, off, minimal, low, medium, high, xhigh,
+# max or ultra.
 thinking = "inherit"
 # turns with tool calls one agent run may take (0 to 10000, 0 for no
 # limit). the agent gets one warning turn to reply first.
@@ -353,6 +353,7 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.local/state/kage/`              | session state (`state.json`) and input history (`history.txt`) |
 | `~/.local/state/kage/trust.json`    | trusted project configs                                        |
 | `~/.cache/kage/models.json`         | model catalog written by `kage models refresh`                 |
+| `~/.cache/kage/chatgpt-models.json` | ChatGPT plan models, written at sign-in and by `kage models refresh` |
 
 `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` /
 `XDG_CACHE_HOME` override the `~/.config`, `~/.local/share`,

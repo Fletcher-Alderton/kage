@@ -157,7 +157,7 @@ Forget the trust recorded for this directory
 Manage the model catalog. kage ships a snapshot of the curated catalog; `kage models refresh` fetches a newer one into the model cache, which later runs use in place of the snapshot\*(Aqs model entries
 .TP
 \fBkage models refresh\fR
-Download the curated model catalog into `$XDG_CACHE_HOME/kage/models.json`. It can add models and update their metadata, never provider endpoints or credentials. Only runs when asked; kage never refreshes on its own
+Download the curated model catalog into `$XDG_CACHE_HOME/kage/models.json`, and with a `ChatGPT` sign\-in the plan\*(Aqs models into `chatgpt\-models.json` beside it. It can add models and update their metadata, never provider endpoints or credentials. Only runs when asked; kage never refreshes on its own
 .TP
 \fB\-\-source\fR\fI <SOURCE>\fR
 Read the catalog from here instead of the published feed. A `file://` URL reads a local file, which is how an offline run or a test pins a catalog. The `KAGE_CATALOG_URL` environment variable sets the same thing
@@ -317,6 +317,9 @@ Session state, input history and trusted projects (trust.json).
 .TP
 \fI~/.cache/kage/models.json\fR
 Model catalog written by kage models refresh.
+.TP
+\fI~/.cache/kage/chatgpt\-models.json\fR
+ChatGPT plan models, written at sign\-in and by kage models refresh.
 .PP
 XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME and XDG_CACHE_HOME replace the ~/.config, ~/.local/share, ~/.local/state and ~/.cache roots.
 .SH VERSION

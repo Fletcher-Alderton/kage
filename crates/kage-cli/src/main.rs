@@ -31,6 +31,7 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod acp_glue;
 mod agents;
 mod auth;
+mod chatgpt;
 mod doctor;
 mod engine;
 mod goal;
@@ -328,9 +329,11 @@ pub(crate) enum Command {
 #[derive(Subcommand, Debug)]
 pub(crate) enum ModelsAction {
     /// Download the curated model catalog into
-    /// `$XDG_CACHE_HOME/kage/models.json`. It can add models and update
-    /// their metadata, never provider endpoints or credentials. Only
-    /// runs when asked; kage never refreshes on its own.
+    /// `$XDG_CACHE_HOME/kage/models.json`, and with a `ChatGPT` sign-in
+    /// the plan's models into `chatgpt-models.json` beside it. It can
+    /// add models and update their metadata, never provider endpoints
+    /// or credentials. Only runs when asked; kage never refreshes on its
+    /// own.
     Refresh {
         /// Read the catalog from here instead of the published feed. A
         /// `file://` URL reads a local file, which is how an offline run
@@ -605,7 +608,8 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
 }
 
 /// Implement `kage models refresh`: download the catalog into the model
-/// cache. `source` overrides the published feed for this run only.
+/// cache, and with a `ChatGPT` login the plan's model list into its own.
+/// `source` overrides the published feed for this run only.
 fn run_models_refresh(source: Option<&str>) -> ExitCode {
     let dest = match models_cache_path() {
         Ok(path) => path,
@@ -615,7 +619,7 @@ fn run_models_refresh(source: Option<&str>) -> ExitCode {
         }
     };
     let url = source.map_or_else(kage_provider::catalog::source::catalog_url, str::to_owned);
-    match kage_provider::catalog::refresh(&url, &dest) {
+    let mut code = match kage_provider::catalog::refresh(&url, &dest) {
         Ok(count) => {
             println!("wrote {count} models to {}", dest.display());
             ExitCode::SUCCESS
@@ -624,7 +628,34 @@ fn run_models_refresh(source: Option<&str>) -> ExitCode {
             eprintln!("kage: models refresh: {e}");
             ExitCode::from(1)
         }
+    };
+    if let Err(e) = refresh_chatgpt_models() {
+        eprintln!("kage: models refresh: ChatGPT {e}");
+        code = ExitCode::from(1);
     }
+    code
+}
+
+/// Refresh the `ChatGPT` plan's model list when a login is stored,
+/// renewing the login first when it is about to expire. A no-op without
+/// one.
+fn refresh_chatgpt_models() -> Result<(), String> {
+    let path = auth::AuthStore::default_path()?;
+    let mut store = auth::AuthStore::load_from(&path)?;
+    if !store
+        .credential(chatgpt::PROVIDER_ID)
+        .is_some_and(auth::Credential::is_oauth)
+    {
+        return Ok(());
+    }
+    chatgpt::ensure_fresh(&mut store, &path, chrono::Utc::now())?;
+    let Some(auth::Credential::Oauth(login)) = store.credential(chatgpt::PROVIDER_ID) else {
+        return Ok(());
+    };
+    let cache = chatgpt::models_cache_path()?;
+    let count = chatgpt::refresh_models(login, &cache)?;
+    println!("wrote {count} ChatGPT plan models to {}", cache.display());
+    Ok(())
 }
 
 /// Implement `kage models fetch`: list the models a provider serves.
@@ -913,6 +944,10 @@ const MANPAGE_FILES: &[(&str, &str)] = &[
     (
         "~/.cache/kage/models.json",
         "Model catalog written by kage models refresh.",
+    ),
+    (
+        "~/.cache/kage/chatgpt-models.json",
+        "ChatGPT plan models, written at sign-in and by kage models refresh.",
     ),
 ];
 
@@ -1230,13 +1265,12 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
     }
-    let mut cx = AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir);
-    if let Some(window) = runtime_env::context_window_for(&registry, &model) {
-        cx = cx.with_context_window(window);
-    }
-    if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
-        cx = cx.with_max_output_tokens(out);
-    }
+    let cx = print_context(
+        AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir),
+        &registry,
+        &model,
+        &layered,
+    );
     let writer = match open_session_writer(cli.no_session, &model, &system_prompt) {
         Ok(writer) => writer,
         Err(e) => {
@@ -1261,6 +1295,32 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         eprintln!("kage: {err}");
     }
     exit
+}
+
+/// `cx` sized for `model` of `registry` (its context window and output
+/// ceiling) and seeded with the `[ui] thinking_level` default of
+/// `config`, as a TUI session is. An unset level stays automatic.
+fn print_context(
+    mut cx: AgentContext,
+    registry: &kage_provider::ProviderRegistry,
+    model: &str,
+    config: &kage_core::config::Config,
+) -> AgentContext {
+    if let Some(level) = config
+        .ui
+        .thinking_level
+        .as_deref()
+        .and_then(kage_provider::ThinkingLevel::parse)
+    {
+        cx = cx.with_thinking_level(level);
+    }
+    if let Some(window) = runtime_env::context_window_for(registry, model) {
+        cx = cx.with_context_window(window);
+    }
+    if let Some(out) = runtime_env::max_output_tokens_for(registry, model) {
+        cx = cx.with_max_output_tokens(out);
+    }
+    cx
 }
 
 mod cli_loop_run;

@@ -169,7 +169,7 @@ by `session/new`, `session/load`, `session/resume` and
 | id         | category        | kind   | values |
 | ---------- | --------------- | ------ | ------ |
 | `model`    | `model`         | select | the models the TUI model picker lists, plus the current one |
-| `thinking` | `thought_level` | select | `default`, named `auto` (high, or the nearest level the model accepts), then the levels the model accepts from `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `thinking` | `thought_level` | select | `default`, named `auto` (high, or the nearest level the model accepts), then the levels the model accepts from `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `mode`     | `mode`          | select | `default` (the configured rules decide), `ask`, `allow`, `deny`, and `plan` chained in after them |
 | `swarm`    | `mode`          | select | `off` (the session does the work itself) or `on` (repeated work is delegated to swarm batches) |
 | `goal`     | none            | text   | free-form text; empty clears the goal |

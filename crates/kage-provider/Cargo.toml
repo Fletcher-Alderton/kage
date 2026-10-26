@@ -27,3 +27,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 url.workspace = true
 ureq.workspace = true
+zstd.workspace = true
