@@ -11,6 +11,8 @@
 //! - `auth` manages saved provider credentials, and `init` is the
 //!   first-run setup wizard.
 //! - `doctor` diagnoses the install, and `trust` trusts a project config.
+//! - `providers` lists the provider ids kage knows and which config
+//!   tables may name each.
 //! - `models` manages the model catalog, and `plugin` the plugins
 //!   directory and installs from kura, the plugin registry.
 //! - `rpc` serves the Agent Client Protocol over stdio, and `serve`
@@ -195,6 +197,17 @@ pub(crate) enum Command {
     /// providers, validates plugins, probes each MCP server.
     /// Exit code is `0` when no check fails, `1` otherwise.
     Doctor,
+    /// List the provider ids this kage knows: the builtins and the
+    /// catalog, with the wire protocol each speaks and whether
+    /// `[providers.<id>]` may override it or `[providers.custom.<id>]`
+    /// may take its id. Custom providers from the config are not
+    /// listed.
+    Providers {
+        /// Print one JSON object, `{"providers": [...]}`, whose
+        /// entries carry `id`, `api`, `override` and `custom`.
+        #[arg(long = "json")]
+        json: bool,
+    },
     /// Render the `kage(1)` manpage from the clap CLI definition and
     /// write it to `--out` (default `man/kage.1`). Hidden because it
     /// is a developer / packager command: end users read the
@@ -549,6 +562,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
             non_interactive,
         } => init::run(force, non_interactive),
         Command::Doctor => doctor::run(),
+        Command::Providers { json } => providers::run_list(json),
         Command::GenManpage { out, check } => run_gen_manpage(&out, check),
         Command::Completions { shell } => run_completions(shell),
         Command::Rpc {

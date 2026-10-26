@@ -102,6 +102,12 @@ Skip every prompt. Useful for scripted bootstrap; will still write a fresh confi
 \fBkage doctor\fR
 Diagnose the kage install: parses config, lists available providers, validates plugins, probes each MCP server. Exit code is `0` when no check fails, `1` otherwise
 .TP
+\fBkage providers\fR
+List the provider ids this kage knows: the builtins and the catalog, with the wire protocol each speaks and whether `[providers.<id>]` may override it or `[providers.custom.<id>]` may take its id. Custom providers from the config are not listed
+.TP
+\fB\-\-json\fR
+Print one JSON object, `{"providers": [...]}`, whose entries carry `id`, `api`, `override` and `custom`
+.TP
 \fBkage completions\fR
 Print a shell completion script for `kage` to stdout
 .TP

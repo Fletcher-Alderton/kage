@@ -455,6 +455,41 @@ The built-in `openai` provider follows the `openai` rule with
 `<base>/responses`. API keys travel in request headers (`x-api-key`,
 `Authorization`, `x-goog-api-key`), never in the URL.
 
+## listing providers
+
+`kage providers` lists every provider id this kage knows, built-in or
+from the catalog, with the wire protocol it speaks and the tables that
+may name it. The builtins come first, then the catalog, shortened
+here:
+
+```
+PROVIDER               API               OVERRIDE  CUSTOM
+acp                    acp               no        no
+anthropic              anthropic         yes       no
+google                 gemini            yes       no
+openai                 openai-responses  yes       no
+zai                    openai            yes       yes
+zai-coding-plan        openai            yes       yes
+...
+```
+
+`OVERRIDE` says whether `[providers.<id>]` may target the id, and
+`CUSTOM` whether `[providers.custom.<id>]` may take it. An id that is
+not listed takes only a custom table. Custom providers from your config
+are not listed, since the command reports what this kage ships.
+
+`kage providers --json` prints the same list as one object for
+scripts, such as a tool that writes kage's config for it. Here it is
+cut to its first entry:
+
+```json
+{"providers":[{"id":"acp","api":"acp","override":false,"custom":false}]}
+```
+
+Each entry carries `id`, `api`, `override` and `custom`. `api` is
+`openai`, `anthropic` or `gemini` as a custom provider's `kind` names
+them, `openai-responses` for the Responses API, or `acp`.
+
 ## validation
 
 A `[providers]` section that kage would silently ignore is refused at

@@ -1,26 +1,146 @@
 //! The provider registry and the default model.
 
+use std::io::{self, Write};
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai, openai_responses};
+use serde::Serialize;
 
 use crate::{acp_glue, auth, chatgpt, state};
 
-/// Builtin provider ids `kage -m <id>:<model>` can address directly.
-/// `acp` is listed because it is a valid `-m` prefix, but it is not
-/// overridable: its configuration lives under `[acp.*]`.
-pub(crate) const BUILTIN_PROVIDER_IDS: &[&str] = &["acp", "anthropic", "google", "openai"];
+/// A provider kage knows by id, and which config tables may name it.
+/// `kage providers` lists these, and `[providers]` validation reads
+/// the same list, so what kage reports is what it accepts.
+#[derive(Debug, Serialize)]
+pub(crate) struct KnownProvider {
+    /// The id, the `provider` in `provider/model`.
+    pub(crate) id: &'static str,
+    /// The wire protocol: `openai`, `anthropic` or `gemini` as a
+    /// custom provider's `kind` names them, `openai-responses`, or
+    /// `acp`.
+    pub(crate) api: &'static str,
+    /// Whether a `[providers.<id>]` override may target it.
+    #[serde(rename = "override")]
+    pub(crate) overridable: bool,
+    /// Whether a `[providers.custom.<id>]` may take the id, replacing
+    /// the provider. Builtins refuse it.
+    pub(crate) custom: bool,
+}
 
-/// Provider ids whose `[providers.<id>]` override kage honours: every
-/// builtin except `acp`, plus each OpenAI-compatible catalog entry.
-fn overridable_provider_ids() -> Vec<&'static str> {
-    let mut ids: Vec<&'static str> = BUILTIN_PROVIDER_IDS
+/// Reads an environment variable, so tests need not set one.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// A builtin provider: the [`KnownProvider`] fields `kage providers`
+/// lists for it, and how it registers.
+struct Builtin {
+    id: &'static str,
+    api: &'static str,
+    overridable: bool,
+    register: fn(&kage_core::config::Config, &auth::AuthStore, EnvLookup, &mut ProviderRegistry),
+}
+
+/// Every builtin, the one list both [`known_providers`] and
+/// [`register_providers`] read. `acp` cannot be overridden: its
+/// configuration lives under `[acp.*]`.
+const BUILTINS: &[Builtin] = &[
+    Builtin {
+        id: "acp",
+        api: "acp",
+        overridable: false,
+        register: register_acp,
+    },
+    Builtin {
+        id: "anthropic",
+        api: "anthropic",
+        overridable: true,
+        register: register_anthropic,
+    },
+    Builtin {
+        id: "google",
+        api: "gemini",
+        overridable: true,
+        register: register_google,
+    },
+    Builtin {
+        id: "openai",
+        api: "openai-responses",
+        overridable: true,
+        register: register_openai,
+    },
+];
+
+/// Every provider kage registers by id: the builtins, then each
+/// catalog entry.
+pub(crate) fn known_providers() -> Vec<KnownProvider> {
+    let builtins = BUILTINS.iter().map(|b| KnownProvider {
+        id: b.id,
+        api: b.api,
+        overridable: b.overridable,
+        custom: false,
+    });
+    let catalog = compat::COMPAT_PROVIDERS.iter().map(|entry| KnownProvider {
+        id: entry.id,
+        api: match entry.kind {
+            compat::CompatKind::OpenAi => "openai",
+            compat::CompatKind::Anthropic => "anthropic",
+        },
+        overridable: true,
+        custom: true,
+    });
+    builtins.chain(catalog).collect()
+}
+
+/// Implement `kage providers`: list [`known_providers`] as a table,
+/// or with `json` as one JSON object for scripts. A reader that closes
+/// the pipe early, such as `head`, is not an error.
+pub(crate) fn run_list(json: bool) -> ExitCode {
+    match write_list(&mut io::stdout().lock(), &known_providers(), json) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("kage: providers: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Render the `kage providers` output, sizing the id column to the
+/// longest id.
+fn write_list<W: Write>(out: &mut W, providers: &[KnownProvider], json: bool) -> io::Result<()> {
+    if json {
+        serde_json::to_writer(&mut *out, &serde_json::json!({ "providers": providers }))?;
+        return writeln!(out);
+    }
+    let width = providers
         .iter()
-        .copied()
-        .filter(|id| *id != "acp")
-        .collect();
-    ids.extend(compat::COMPAT_PROVIDERS.iter().map(|entry| entry.id));
-    ids
+        .map(|p| p.id.len())
+        .chain(["PROVIDER".len()])
+        .max()
+        .unwrap_or_default();
+    let api_width = providers
+        .iter()
+        .map(|p| p.api.len())
+        .chain(["API".len()])
+        .max()
+        .unwrap_or_default();
+    writeln!(
+        out,
+        "{:<width$}  {:<api_width$}  OVERRIDE  CUSTOM",
+        "PROVIDER", "API"
+    )?;
+    let yes_no = |flag: bool| if flag { "yes" } else { "no" };
+    for p in providers {
+        writeln!(
+            out,
+            "{:<width$}  {:<api_width$}  {:<8}  {}",
+            p.id,
+            p.api,
+            yes_no(p.overridable),
+            yes_no(p.custom)
+        )?;
+    }
+    Ok(())
 }
 
 /// Checks the `[providers]` cross-references serde cannot: custom ids
@@ -33,8 +153,15 @@ fn overridable_provider_ids() -> Vec<&'static str> {
 pub(crate) fn validate_providers(
     providers: &kage_core::config::ProvidersConfig,
 ) -> Result<(), String> {
+    let known = known_providers();
+    let builtin: Vec<&str> = known.iter().filter(|p| !p.custom).map(|p| p.id).collect();
+    let overridable: Vec<&str> = known
+        .iter()
+        .filter(|p| p.overridable)
+        .map(|p| p.id)
+        .collect();
     providers
-        .validate(BUILTIN_PROVIDER_IDS, &overridable_provider_ids())
+        .validate(&builtin, &overridable)
         .map_err(|e| e.to_string())
 }
 
@@ -65,10 +192,7 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
     if let Ok(path) = auth::AuthStore::default_path() {
         let _ = chatgpt::ensure_fresh(&mut store, &path, chrono::Utc::now());
     }
-    let mut registry = ProviderRegistry::new();
-    register_openai(&config, &store, &env_key, &mut registry);
-    register_compat_providers(&config, &store, &mut registry);
-    let replaced = register_custom_providers(&config, &store, &mut registry);
+    let (registry, replaced) = register_providers(&config, &store, &env_key);
     WARN_REPLACED.call_once(|| {
         for id in &replaced {
             eprintln!(
@@ -76,11 +200,38 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
             );
         }
     });
+    Ok(registry)
+}
+
+/// Register every provider `config` and `store` make available, and
+/// return the registry with the catalog ids a custom provider replaced.
+/// `env` reads the builtins' environment variables.
+fn register_providers(
+    config: &kage_core::config::Config,
+    store: &auth::AuthStore,
+    env: EnvLookup,
+) -> (ProviderRegistry, Vec<String>) {
+    let mut registry = ProviderRegistry::new();
+    for builtin in BUILTINS {
+        (builtin.register)(config, store, env, &mut registry);
+    }
+    register_compat_providers(config, store, &mut registry);
+    let replaced = register_custom_providers(config, store, &mut registry);
+    (registry, replaced)
+}
+
+/// Register the built-in `anthropic` provider when its key is set.
+fn register_anthropic(
+    config: &kage_core::config::Config,
+    store: &auth::AuthStore,
+    env: EnvLookup,
+    registry: &mut ProviderRegistry,
+) {
     let ov = config.providers.overrides.get("anthropic");
-    let env = ov
+    let env_name = ov
         .and_then(|o| o.api_key_env.as_deref())
         .unwrap_or_else(|| auth::env_var_for("anthropic"));
-    if let Some(key) = lookup_key_with_env("anthropic", env, &store) {
+    if let Some(key) = key_from("anthropic", env_name, store, env) {
         let mut provider = match ov.and_then(|o| o.base_url.clone()) {
             Some(base) => anthropic::AnthropicProvider::with_base_url(key, base),
             None => anthropic::AnthropicProvider::new(key),
@@ -92,11 +243,20 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
         }
         registry.register(Arc::new(provider));
     }
+}
+
+/// Register the built-in `google` provider when its key is set.
+fn register_google(
+    config: &kage_core::config::Config,
+    store: &auth::AuthStore,
+    env: EnvLookup,
+    registry: &mut ProviderRegistry,
+) {
     let ov = config.providers.overrides.get("google");
-    let env = ov
+    let env_name = ov
         .and_then(|o| o.api_key_env.as_deref())
         .unwrap_or_else(|| auth::env_var_for("google"));
-    if let Some(key) = lookup_key_with_env("google", env, &store) {
+    if let Some(key) = key_from("google", env_name, store, env) {
         let mut provider = match ov.and_then(|o| o.base_url.clone()) {
             Some(base) => gemini::GeminiProvider::with_base_url(key, base),
             None => gemini::GeminiProvider::new(key),
@@ -108,17 +268,24 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
         }
         registry.register(Arc::new(provider));
     }
-    // The `acp` provider: `kage -m acp:<name>` drives an external ACP
-    // agent declared in `[acp.agents.*]` or via `kage.acp.add_agent`.
-    // Always registered (plugin-declared agents are resolved lazily);
-    // its permission resolver defers to `kage.on_acp_permission` and
-    // denies otherwise.
+}
+
+/// Register the `acp` provider: `kage -m acp:<name>` drives an external
+/// ACP agent declared in `[acp.agents.*]` or via `kage.acp.add_agent`.
+/// It needs no key and always registers, since plugin-declared agents
+/// resolve lazily. Its permission resolver defers to
+/// `kage.on_acp_permission` and denies otherwise.
+fn register_acp(
+    config: &kage_core::config::Config,
+    _store: &auth::AuthStore,
+    _env: EnvLookup,
+    registry: &mut ProviderRegistry,
+) {
     registry.register(Arc::new(
         kage_acp::client::AcpProvider::from_config(&config.acp)
             .with_permission(acp_glue::permission_resolver())
             .with_agent_source(acp_glue::agent_source()),
     ));
-    Ok(registry)
 }
 
 /// Register the built-in `openai` provider on the Responses API. An
@@ -129,7 +296,7 @@ pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
 fn register_openai(
     config: &kage_core::config::Config,
     store: &auth::AuthStore,
-    env: &dyn Fn(&str) -> Option<String>,
+    env: EnvLookup,
     registry: &mut ProviderRegistry,
 ) {
     let ov = config.providers.overrides.get("openai");
@@ -329,7 +496,17 @@ pub(crate) fn lookup_key_with_env(
     env_var: &str,
     store: &auth::AuthStore,
 ) -> Option<String> {
-    env_key(env_var).or_else(|| {
+    key_from(provider, env_var, store, &env_key)
+}
+
+/// [`lookup_key_with_env`] with `env` reading the environment variable.
+fn key_from(
+    provider: &str,
+    env_var: &str,
+    store: &auth::AuthStore,
+    env: EnvLookup,
+) -> Option<String> {
+    env(env_var).or_else(|| {
         store
             .api_credential(provider)
             .map(|c| c.raw_token().to_owned())
@@ -512,6 +689,80 @@ mod tests {
             .unwrap()
             .collect();
         assert!(events.iter().all(Result::is_ok), "{events:?}");
+    }
+
+    /// Whether `[providers]` validation accepts `toml`.
+    fn accepts(toml: &str) -> bool {
+        let config: kage_core::config::Config = toml::from_str(toml).unwrap();
+        validate_providers(&config.providers).is_ok()
+    }
+
+    /// A custom provider table for `id` that is complete apart from
+    /// its id, so only the id decides whether it is accepted.
+    fn custom_table(id: &str) -> String {
+        format!(
+            "[providers.custom.{id}]\nbase_url = \"http://127.0.0.1:1/v1\"\n\n\
+             [[providers.custom.{id}.models]]\nid = \"m\"\nname = \"m\"\n"
+        )
+    }
+
+    /// An id `kage providers` does not list takes a custom table and
+    /// no override, which is what lets a script treat the listing as
+    /// complete.
+    #[test]
+    fn an_unlisted_id_takes_only_a_custom_table() {
+        assert!(known_providers().iter().all(|p| p.id != "unlisted-gw"));
+        assert!(!accepts("[providers.unlisted-gw]\n"));
+        assert!(accepts(&custom_table("unlisted-gw")));
+    }
+
+    /// The JSON form is one object whose entries carry the four
+    /// fields scripts read, under these names.
+    #[test]
+    fn the_json_listing_names_each_field() {
+        let mut out = Vec::new();
+        write_list(&mut out, &known_providers(), true).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.ends_with("}\n"), "{text}");
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let providers = parsed["providers"].as_array().unwrap();
+        let openai = providers.iter().find(|p| p["id"] == "openai").unwrap();
+        assert_eq!(
+            openai,
+            &serde_json::json!({
+                "id": "openai",
+                "api": "openai-responses",
+                "override": true,
+                "custom": false,
+            })
+        );
+        let kenari = providers
+            .iter()
+            .find(|p| p["id"] == "kenari-claude")
+            .unwrap();
+        assert_eq!(kenari["api"], "anthropic");
+    }
+
+    /// With every key set, registration builds exactly the builtins
+    /// `kage providers` lists, so a builtin registered outside
+    /// [`BUILTINS`] fails here.
+    #[test]
+    fn the_listed_builtins_are_the_registered_ones() {
+        let known = known_providers();
+        let mut listed: Vec<&str> = known.iter().filter(|p| !p.custom).map(|p| p.id).collect();
+        listed.sort_unstable();
+        let env = |_: &str| Some("fake-key".to_owned());
+        let (registry, _) = register_providers(
+            &kage_core::config::Config::default(),
+            &auth::AuthStore::empty(),
+            &env,
+        );
+        let mut registered: Vec<&str> = registry
+            .ids()
+            .filter(|id| compat::COMPAT_PROVIDERS.iter().all(|e| e.id != *id))
+            .collect();
+        registered.sort_unstable();
+        assert_eq!(registered, listed);
     }
 
     /// A store holding only a `ChatGPT` login.
