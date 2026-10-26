@@ -236,6 +236,112 @@ fn model_picker_renders_its_login_note() {
 }
 
 #[test]
+fn model_picker_marks_the_current_sessions_model() {
+    use kage_core::protocol::{HostEvent, SessionState};
+
+    let (mut app, _rx, events) = app_with_events();
+    app.set_status_model(Arc::new(Mutex::new("fake/default".into())));
+    let choices = vec![
+        PickItem::simple("fake/default")
+            .with_label("Default model")
+            .with_badge('*'),
+        PickItem::simple("fake:session")
+            .with_label("Session model")
+            .with_badge(' '),
+    ];
+
+    for (model, expected) in [
+        ("fake/default", Some("Default model")),
+        ("fake/session", Some("Session model")),
+        ("fake/unlisted", None),
+        ("fake:default", Some("Default model")),
+    ] {
+        let session = kage_core::SessionId::new();
+        send_to(
+            &mut app,
+            &events,
+            session,
+            vec![
+                HostEvent::SessionChanged {
+                    path: format!("/tmp/{session}.jsonl").into(),
+                    title: None,
+                    timeline: Vec::new(),
+                    compacted_agents: Vec::new(),
+                }
+                .into(),
+                HostEvent::StateChanged {
+                    state: SessionState {
+                        model: model.into(),
+                        ..SessionState::default()
+                    },
+                }
+                .into(),
+            ],
+        );
+        app.set_model_choices(choices.clone());
+        let _ = app.apply(InputAction::OpenModelPicker);
+        let rows = rendered(&mut app, 120, 24);
+        let starred: Vec<_> = rows.iter().filter(|row| row.contains(" * ")).collect();
+        if let Some(expected) = expected {
+            assert_eq!(starred.len(), 1, "{model}: {rows:#?}");
+            assert!(starred[0].contains(expected), "{model}: {rows:#?}");
+        } else {
+            assert!(starred.is_empty(), "{model}: {rows:#?}");
+        }
+        app.picker = None;
+    }
+}
+
+#[test]
+fn model_picker_prefers_reported_usage_over_status_fallback() {
+    use kage_core::protocol::{HostEvent, SessionState};
+
+    let (mut app, _rx, events) = app_with_events();
+    app.set_model_choices(vec![PickItem::simple("fake/m")]);
+    feed(
+        &mut app,
+        &events,
+        vec![
+            HostEvent::StateChanged {
+                state: SessionState {
+                    model: "fake/m".into(),
+                    ..SessionState::default()
+                },
+            }
+            .into(),
+        ],
+    );
+    let _ = app.apply(InputAction::OpenModelPicker);
+    let rows = rendered(&mut app, 120, 24);
+    assert!(
+        rows.iter().any(|row| row.contains(" * fake/m")),
+        "{rows:#?}"
+    );
+    for status in ["", "fake/stale"] {
+        app.picker = None;
+        app.set_status_model(Arc::new(Mutex::new(status.into())));
+        let _ = app.apply(InputAction::OpenModelPicker);
+        let rows = rendered(&mut app, 120, 24);
+        assert!(
+            rows.iter().any(|row| row.contains(" * fake/m")),
+            "{status}: {rows:#?}"
+        );
+    }
+}
+
+#[test]
+fn model_picker_keeps_host_badges_without_live_model_state() {
+    let mut app = defaults_app();
+    app.set_model_choices(vec![PickItem::simple("fake/m").with_badge('*')]);
+    let _ = app.apply(InputAction::OpenModelPicker);
+    let rows = rendered(&mut app, 120, 24);
+    assert!(
+        rows.iter().any(|row| row.contains(" * fake/m")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
 fn session_picker_defaults_to_cwd_and_ctrl_a_toggles_all() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();

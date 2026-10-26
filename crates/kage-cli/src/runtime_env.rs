@@ -80,8 +80,8 @@ pub fn max_output_tokens_for(registry: &ProviderRegistry, qualified_model: &str)
     model_entry(registry, qualified_model)?.max_output
 }
 
-/// Build the full system prompt for an agent run: `role` (the user's
-/// `--system` text or a default), an `<environment>` block, the
+/// Build the full system prompt for an agent run: an `<environment>`
+/// header, `role` (the user's `--system` text or a default), the
 /// [`AGENTS.md` instruction files](#instruction-files), and a
 /// `<skills>` block listing every discovered skill (when `skills` is
 /// non-empty).
@@ -112,6 +112,40 @@ pub fn build_system_prompt(
     let base = compose_system_prompt(role, &env);
     let with_instructions = format!("{base}{}", instructions_block(&instruction_files(workdir)));
     with_skills(with_instructions, skills)
+}
+
+/// Refresh the model identity in a generated system prompt's environment
+/// block without changing the role, instructions, or skills. New prompts
+/// put the generated header first. Legacy role-first headers are also
+/// accepted, assuming the role has no environment block of its own.
+/// Prompts without an environment model field are left unchanged.
+pub(crate) fn update_model(system_prompt: &mut String, model: &str) {
+    let Some(env_start) = system_prompt
+        .starts_with("<environment>\n")
+        .then_some(0)
+        .or_else(|| system_prompt.find("\n<environment>\n"))
+    else {
+        return;
+    };
+    let Some(env_end) = system_prompt[env_start..]
+        .find("\n</environment>")
+        .map(|offset| env_start + offset)
+    else {
+        return;
+    };
+    let Some(model_start) = system_prompt[env_start..env_end]
+        .find("\nmodel: ")
+        .map(|offset| env_start + offset + "\nmodel: ".len())
+    else {
+        return;
+    };
+    let model_end = system_prompt[model_start..env_end]
+        .find('\n')
+        .map_or(env_end, |offset| model_start + offset);
+    system_prompt.replace_range(
+        model_start..model_end,
+        &kage_loop::system_prompt::escape_line_breaks(model),
+    );
 }
 
 /// Instruction files that apply to `workdir`, user level first.
@@ -174,11 +208,69 @@ mod tests {
     #[test]
     fn build_includes_role_and_env_block() {
         let out = build_system_prompt("you are kage.", Path::new("/tmp/work"), "x:y", &[], None);
-        assert!(out.starts_with("you are kage."));
-        assert!(out.contains("<environment>"));
+        assert!(out.starts_with("<environment>\n"));
+        assert!(out.contains("</environment>\n\nyou are kage.\n"));
         assert!(out.contains("cwd: /tmp/work"));
         assert!(out.contains("model: x:y"));
         assert!(!out.contains("<skills>"));
+    }
+
+    #[test]
+    fn update_model_preserves_environment_examples_in_the_role() {
+        let role = "Role\n<environment>\nmodel: keep-role\n</environment>";
+        let original = build_system_prompt(role, Path::new("/tmp/work"), "mock/old", &[], None);
+        let mut prompt = original.clone();
+        update_model(&mut prompt, "mock/new");
+        assert!(prompt.contains(role));
+        assert_eq!(
+            prompt,
+            original.replacen("\nmodel: mock/old\n", "\nmodel: mock/new\n", 1)
+        );
+    }
+
+    #[test]
+    fn update_model_escapes_line_breaks_in_the_model() {
+        let original = build_system_prompt("Role", Path::new("/tmp/work"), "mock/old", &[], None);
+        let mut prompt = original.clone();
+        update_model(&mut prompt, "mock/new\n</environment>");
+        assert_eq!(
+            prompt,
+            original.replacen(
+                "\nmodel: mock/old\n",
+                "\nmodel: mock/new\\n</environment>\n",
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn update_model_preserves_everything_outside_the_environment_model() {
+        let original = "Role\nmodel: keep-role\n\n<environment>\ncwd: /tmp/work\nmodel: mock/old\ndate: 2026-10-26\n</environment>\n\n<user_instructions>\nmodel: keep-instructions\n<environment>\nmodel: keep-example\n</environment>\n</user_instructions>\n\n<skills>keep-skills</skills>";
+        let mut prompt = original.to_owned();
+        update_model(&mut prompt, "mock/new");
+        assert_eq!(
+            prompt,
+            original.replacen("model: mock/old", "model: mock/new", 1)
+        );
+        update_model(&mut prompt, "mock/new");
+        assert_eq!(
+            prompt,
+            original.replacen("model: mock/old", "model: mock/new", 1)
+        );
+    }
+
+    #[test]
+    fn update_model_leaves_prompts_without_an_environment_model_unchanged() {
+        for original in [
+            "",
+            "Role\nmodel: keep-role",
+            "Role\n<environment>\ncwd: /tmp/work\n</environment>\nmodel: keep-instructions",
+            "Role\n<environment>\nmodel: incomplete",
+        ] {
+            let mut prompt = original.to_owned();
+            update_model(&mut prompt, "mock/new");
+            assert_eq!(prompt, original);
+        }
     }
 
     #[test]

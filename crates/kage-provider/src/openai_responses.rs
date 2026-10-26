@@ -1636,9 +1636,7 @@ mod tests {
         std::thread::spawn(move || {
             for (i, conn) in listener.incoming().enumerate() {
                 let Ok(mut conn) = conn else { return };
-                let mut buf = [0u8; 8192];
-                let _ = conn.read(&mut buf);
-                let head = String::from_utf8_lossy(&buf).into_owned();
+                let head = crate::testing::read_request(&mut conn);
                 let token = head
                     .lines()
                     .find(|l| l.to_ascii_lowercase().starts_with("authorization"))
@@ -1708,8 +1706,7 @@ mod tests {
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(mut conn) = conn else { return };
-                let mut buf = [0u8; 8192];
-                let _ = conn.read(&mut buf);
+                crate::testing::read_request(&mut conn);
                 let body = "{\"error\":{\"message\":\"expired\"}}";
                 let _ = std::io::Write::write_all(
                     &mut conn,

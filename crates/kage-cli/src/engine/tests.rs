@@ -1266,6 +1266,42 @@ fn set_model(engine: &Engine, id: SessionId, model: &str) {
     ));
 }
 
+fn open_with_env(h: &Harness, id: SessionId, recorder: Option<Recorder>) {
+    let mut spec = h.spec(id);
+    spec.recorder = recorder;
+    spec.cx.system_prompt = crate::runtime_env::build_system_prompt(
+        "You are kage.",
+        &spec.cx.workdir,
+        "mock/m",
+        &[],
+        None,
+    );
+    h.engine.open(spec);
+}
+
+#[test]
+fn a_model_switch_refreshes_the_system_prompt() {
+    let mock = MockProvider::replaying(text_turn("hello"));
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    open_with_env(&h, id, None);
+
+    for model in ["mock/m", "mock/other", "mock/m"] {
+        set_model(&h.engine, id, model);
+        prompt(&h.engine, id, "what model are you?", Delivery::Steer);
+        until_runs_end(&h.events, 1);
+        let request = mock.last_request().unwrap();
+        assert_eq!(request.model, model.strip_prefix("mock/").unwrap());
+        assert!(
+            request
+                .system
+                .unwrap()
+                .contains(&format!("\nmodel: {model}\n")),
+            "system prompt should identify the selected model {model}"
+        );
+    }
+}
+
 #[test]
 fn a_model_switch_survives_a_reload() {
     let dir = tempfile::tempdir().unwrap();
@@ -1279,28 +1315,35 @@ fn a_model_switch_survives_a_reload() {
     });
     first.engine.shutdown();
 
-    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let mock = MockProvider::replaying(text_turn("hello"));
+    let h = harness(mock.clone());
     let fresh = SessionId::new();
-    h.open(fresh, None);
+    open_with_env(&h, fresh, None);
     h.engine
         .send(Command::to(fresh, CommandKind::LoadSession { path }));
     let seen = wait_for(&h.events, is_session_changed);
     let loaded = seen.last().unwrap().session;
     let seen = wait_for(&h.events, |e| e.session == loaded && state_of(e).is_some());
     assert_eq!(state_of(seen.last().unwrap()).unwrap().model, "mock/other");
+    prompt(&h.engine, loaded, "what model are you?", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    let request = mock.last_request().unwrap();
+    assert_eq!(request.model, "other");
+    assert!(request.system.unwrap().contains("\nmodel: mock/other\n"));
 }
 
 #[test]
 fn a_model_switch_during_a_run_is_recorded_at_the_next_run() {
     let dir = tempfile::tempdir().unwrap();
-    let h = harness(MockProvider::sequence(vec![
+    let mock = MockProvider::sequence(vec![
         tool_turn("gate"),
         text_turn("done"),
         text_turn("again"),
-    ]));
+    ]);
+    let h = harness(mock.clone());
     let id = SessionId::new();
     let (recorder, path) = recorder_in(dir.path(), id);
-    h.open(id, Some(recorder));
+    open_with_env(&h, id, Some(recorder));
     prompt(&h.engine, id, "go", Delivery::Steer);
     wait_for(&h.events, is_tool_start);
 
@@ -1308,10 +1351,17 @@ fn a_model_switch_during_a_run_is_recorded_at_the_next_run() {
     h.release.send(()).unwrap();
     until_runs_end(&h.events, 1);
     assert_eq!(kage_session::replay(&path).unwrap().model, "mock/m");
+    for request in mock.requests() {
+        assert_eq!(request.model, "m");
+        assert!(request.system.unwrap().contains("\nmodel: mock/m\n"));
+    }
 
     prompt(&h.engine, id, "again", Delivery::Steer);
     until_runs_end(&h.events, 1);
     assert_eq!(kage_session::replay(&path).unwrap().model, "mock/other");
+    let request = mock.last_request().unwrap();
+    assert_eq!(request.model, "other");
+    assert!(request.system.unwrap().contains("\nmodel: mock/other\n"));
 }
 
 #[test]

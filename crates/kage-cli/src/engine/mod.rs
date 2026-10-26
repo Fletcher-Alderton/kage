@@ -2288,8 +2288,9 @@ fn requeue_backoff(
 pub(crate) const AUTO_THINKING: &str = "default";
 
 /// Set what `cx` takes from `model` (`provider/model`): its prompt
-/// window, output cap and thinking settings.
+/// identity, window, output cap and thinking settings.
 fn fit_context(cx: &mut AgentContext, registry: &ProviderRegistry, model: &str) {
+    crate::runtime_env::update_model(&mut cx.system_prompt, model);
     if let Some(window) = crate::runtime_env::context_window_for(registry, model) {
         cx.context_window = window;
     }

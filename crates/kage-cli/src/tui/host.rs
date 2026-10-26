@@ -421,8 +421,7 @@ impl Host {
         if let Err(err) = crate::state::record_last_model(model) {
             self.error(format!("state: {err}"));
         }
-        // The picker rows carry their badges from build time; without a
-        // fresh snapshot they keep pointing at the previous model.
+        // Model-select handlers can register commands, widgets, or completions.
         self.publish_plugin_refresh(model);
     }
 

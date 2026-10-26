@@ -144,17 +144,7 @@ impl App {
             InputAction::Cancel => {
                 self.trip_cancel();
             }
-            InputAction::OpenModelPicker => {
-                if self.model_choices.is_empty() {
-                    self.notify("no models available. Run /login to connect a provider");
-                } else {
-                    self.picker = Some(
-                        OverlayPicker::new("switch model", self.model_choices.clone())
-                            .with_note("/login to add a provider"),
-                    );
-                    self.picker_kind = Some(PickerKind::Model);
-                }
-            }
+            InputAction::OpenModelPicker => self.open_model_picker(),
             InputAction::FocusPrev => {
                 let mut buf = lock(&self.buffer);
                 buf.focus_prev_any();

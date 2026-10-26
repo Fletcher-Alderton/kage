@@ -136,6 +136,31 @@ pub fn collect_ok(
     stream.map(|r| r.expect("stream item is Ok")).collect()
 }
 
+/// Read one HTTP request from `conn`: the head, then as many body
+/// bytes as its `content-length` names. Mock servers call this before
+/// answering, because Windows resets a connection that closes with
+/// unread data and the client then loses the answer.
+#[cfg(test)]
+pub(crate) fn read_request(conn: &mut std::net::TcpStream) -> String {
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = std::io::Read::read(conn, &mut buf).unwrap();
+        raw.extend_from_slice(&buf[..n]);
+    }
+    let head = String::from_utf8_lossy(&raw).to_lowercase();
+    let length: usize = head
+        .lines()
+        .find_map(|l| l.strip_prefix("content-length:"))
+        .map_or(0, |v| v.trim().parse().unwrap());
+    let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    while raw.len() < body_start + length {
+        let n = std::io::Read::read(conn, &mut buf).unwrap();
+        raw.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8(raw).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

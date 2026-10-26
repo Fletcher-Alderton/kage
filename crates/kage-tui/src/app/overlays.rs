@@ -286,6 +286,29 @@ impl App {
         }
     }
 
+    /// Open the model picker with the current session's model marked `*`.
+    pub(crate) fn open_model_picker(&mut self) {
+        if self.model_choices.is_empty() {
+            self.notify("no models available. Run /login to connect a provider");
+            return;
+        }
+        let active = self.model_id(self.main_usage().as_ref());
+        let mut items = self.model_choices.clone();
+        if let Some(active) = active {
+            let active = kage_core::canonical_model(&active);
+            for item in &mut items {
+                item.badge = Some(if kage_core::canonical_model(&item.value) == active {
+                    '*'
+                } else {
+                    ' '
+                });
+            }
+        }
+        self.picker =
+            Some(OverlayPicker::new("switch model", items).with_note("/login to add a provider"));
+        self.picker_kind = Some(PickerKind::Model);
+    }
+
     /// Title for the session picker, encoding the active scope and
     /// the `ctrl+a` toggle so the binding is discoverable in-place.
     pub(crate) fn session_picker_title(all: bool) -> &'static str {

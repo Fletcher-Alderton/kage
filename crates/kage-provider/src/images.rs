@@ -332,7 +332,7 @@ fn server_message(error: ProviderError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read as _, Write as _};
+    use std::io::Write as _;
     use std::net::TcpListener;
 
     use super::*;
@@ -357,7 +357,7 @@ mod tests {
     ) -> std::thread::JoinHandle<String> {
         std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
-            let raw = read_request(&mut conn);
+            let raw = crate::testing::read_request(&mut conn);
             let answer = format!(
                 "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{headers}\
                  content-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -366,26 +366,6 @@ mod tests {
             conn.write_all(answer.as_bytes()).unwrap();
             raw
         })
-    }
-
-    fn read_request(conn: &mut std::net::TcpStream) -> String {
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 4096];
-        while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
-            let n = conn.read(&mut buf).unwrap();
-            raw.extend_from_slice(&buf[..n]);
-        }
-        let head = String::from_utf8_lossy(&raw).to_lowercase();
-        let length: usize = head
-            .lines()
-            .find_map(|l| l.strip_prefix("content-length:"))
-            .map_or(0, |v| v.trim().parse().unwrap());
-        let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-        while raw.len() < body_start + length {
-            let n = conn.read(&mut buf).unwrap();
-            raw.extend_from_slice(&buf[..n]);
-        }
-        String::from_utf8(raw).unwrap()
     }
 
     fn endpoint(base_url: String) -> ImageEndpoint {
@@ -599,7 +579,7 @@ mod tests {
             let mut requests = Vec::new();
             for (status, body) in answers {
                 let (mut conn, _) = listener.accept().unwrap();
-                requests.push(read_request(&mut conn));
+                requests.push(crate::testing::read_request(&mut conn));
                 let answer = format!(
                     "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
                      content-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -683,7 +663,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
-            read_request(&mut conn);
+            crate::testing::read_request(&mut conn);
             std::thread::sleep(hold);
         });
         addr
@@ -733,7 +713,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
-            read_request(&mut conn);
+            crate::testing::read_request(&mut conn);
             conn.write_all(
                 b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
                   content-length: 4096\r\n\r\n{\"data\":[{\"b64_json\":\"",
