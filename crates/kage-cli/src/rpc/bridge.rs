@@ -30,7 +30,7 @@ use kage_core::{
 };
 use kage_jsonrpc::Peer;
 
-use super::content::image_block;
+use super::content::source_block;
 use super::live::{Live, Seed};
 use super::mcp::prompt_commands;
 use super::options::{Settings, config_options};
@@ -1053,7 +1053,12 @@ impl Bridge {
                 Content::Text { text } if !text.is_empty() => {
                     kage_acp::acp::ContentBlock::text(text.clone())
                 }
-                Content::Image { source, mime } if !ours => image_block(source, mime),
+                Content::Image { source, mime } if !ours => {
+                    source_block(source, mime, kage_acp::acp::ContentBlock::Image)
+                }
+                Content::Audio { source, mime } if !ours => {
+                    source_block(source, mime, kage_acp::acp::ContentBlock::Audio)
+                }
                 _ => continue,
             };
             self.send(session, client_id, user_chunk(block));

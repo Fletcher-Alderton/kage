@@ -30,7 +30,7 @@ use super::live::Live;
 
 use super::bridge::to_update;
 use super::bridge::user_chunk;
-use super::content::image_block;
+use super::content::source_block;
 use super::mcp::editor_servers;
 use super::options::config_options;
 use crate::engine::{Recorder, render_session_markdown};
@@ -408,10 +408,12 @@ pub(super) fn replay_updates(timeline: &[TimelineItem]) -> Vec<SessionUpdate> {
             TimelineItem::Message(message) => message,
         };
         let prompt = message.role == Role::User
-            && message
-                .content
-                .iter()
-                .any(|block| matches!(block, Content::Text { .. } | Content::Image { .. }));
+            && message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    Content::Text { .. } | Content::Image { .. } | Content::Audio { .. }
+                )
+            });
         if prompt {
             updates.extend(run.and_then(|(start, last)| run_end(start, last?)));
             run = Some((message, None));
@@ -425,7 +427,10 @@ pub(super) fn replay_updates(timeline: &[TimelineItem]) -> Vec<SessionUpdate> {
                 }
                 (Role::User, Content::Text { text }) => Some(user_chunk(ContentBlock::text(text))),
                 (Role::User, Content::Image { source, mime }) => {
-                    Some(user_chunk(image_block(source, mime)))
+                    Some(user_chunk(source_block(source, mime, ContentBlock::Image)))
+                }
+                (Role::User, Content::Audio { source, mime }) => {
+                    Some(user_chunk(source_block(source, mime, ContentBlock::Audio)))
                 }
                 // A tool's images and clips ride its result, below.
                 (Role::ToolResult, Content::Image { .. } | Content::Audio { .. }) => None,
@@ -983,6 +988,32 @@ mod tests {
             .collect();
         assert!(
             matches!(&chunks[0], kage_acp::acp::ContentBlock::Audio(blob)
+                if blob.data == "SUQz" && blob.mime_type == "audio/mpeg"),
+            "{chunks:?}"
+        );
+    }
+
+    #[test]
+    fn an_attached_audio_replays_as_the_users_audio_chunk() {
+        let timeline = vec![TimelineItem::Message(Arc::new(Message::new(
+            Role::User,
+            vec![Content::Audio {
+                source: kage_core::MediaSource::Base64 {
+                    data: "SUQz".to_owned(),
+                },
+                mime: "audio/mpeg".to_owned(),
+            }],
+            None,
+        )))];
+        let chunks: Vec<_> = replay_updates(&timeline)
+            .into_iter()
+            .filter_map(|update| match update {
+                SessionUpdate::UserMessageChunk(chunk) => Some(chunk.content),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(&chunks[..], [kage_acp::acp::ContentBlock::Audio(blob)]
                 if blob.data == "SUQz" && blob.mime_type == "audio/mpeg"),
             "{chunks:?}"
         );

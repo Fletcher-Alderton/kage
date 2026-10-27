@@ -310,7 +310,15 @@ fn mcp_content(value: &Value, server: &str, budget: &mut usize) -> Content {
             Some(data) => image(data, field("mimeType").unwrap_or("image/png")),
             None => text("[image omitted]".to_owned()),
         },
-        Some("audio") => text("[audio omitted]".to_owned()),
+        Some("audio") => match field("data") {
+            Some(data) => Content::Audio {
+                source: MediaSource::Base64 {
+                    data: data.to_owned(),
+                },
+                mime: field("mimeType").unwrap_or("audio/wav").to_owned(),
+            },
+            None => text("[audio omitted]".to_owned()),
+        },
         Some("resource") => match embedded_resource(value.get("resource")) {
             Some(part) => resource_content(server, part, budget),
             None => text("[resource omitted]".to_owned()),
@@ -777,7 +785,11 @@ mod tests {
                 Role::User,
                 json!({ "type": "resource_link", "uri": "test://l", "name": "L" }),
             ),
-            message(Role::User, json!({ "type": "audio", "data": "x" })),
+            message(
+                Role::User,
+                json!({ "type": "audio", "data": "SUQz", "mimeType": "audio/mpeg" }),
+            ),
+            message(Role::User, json!({ "type": "audio" })),
         ]
         .iter()
         .map(|m| prompt_content(m, "srv", &mut budget))
@@ -799,6 +811,12 @@ mod tests {
                     "body"
                 )),
                 text("Referenced resource: test://l (L)"),
+                Content::Audio {
+                    source: MediaSource::Base64 {
+                        data: "SUQz".into()
+                    },
+                    mime: "audio/mpeg".into(),
+                },
                 text("[audio omitted]"),
             ]
         );

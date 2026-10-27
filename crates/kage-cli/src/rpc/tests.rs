@@ -1268,7 +1268,7 @@ fn a_set_goal_is_sent_to_the_agent_checked_each_turn_and_clearing_stops_the_chec
 }
 
 #[test]
-fn initialize_advertises_image_and_embedded_context() {
+fn initialize_advertises_image_audio_and_embedded_context() {
     let dir = tempfile::tempdir().unwrap();
     let h = serve(Vec::new(), dir.path(), dir.path());
     let params = serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}});
@@ -1276,7 +1276,7 @@ fn initialize_advertises_image_and_embedded_context() {
     let caps = &init["agentCapabilities"]["promptCapabilities"];
     assert_eq!(caps["image"], true);
     assert_eq!(caps["embeddedContext"], true);
-    assert_eq!(caps["audio"], false);
+    assert_eq!(caps["audio"], true);
     assert_eq!(init["agentCapabilities"]["steer"], true);
     let cwd = std::env::current_dir().unwrap().display().to_string();
     assert_eq!(
@@ -1334,7 +1334,12 @@ fn prompt_blocks_reach_the_engine_as_content() {
             image(),
             image(),
             text("[binary resource file:///w/d.bin: application/octet-stream]"),
-            text("[audio omitted]"),
+            Content::Audio {
+                source: MediaSource::Base64 {
+                    data: "AAAA".into(),
+                },
+                mime: "audio/wav".into(),
+            },
         ]
     );
 }

@@ -266,8 +266,8 @@ the result as your prompt.
   spaces included.
 - A missing required argument fails before anything reaches the
   model: `mcp everything:complex_prompt: missing argument temperature`.
-- Text stays text, images stay images, and embedded resources become
-  resource blocks. A resource link becomes one line,
+- Text stays text, images stay images, audio stays audio, and
+  embedded resources become resource blocks. A resource link becomes one line,
   `Referenced resource: <uri> (<name>)`.
 - Messages the prompt gives the assistant role are kept in the same
   user message as text starting with `Assistant: `, because providers

@@ -198,11 +198,12 @@ Each block of a `session/prompt` reaches the model:
 | `image` | the image |
 | `resource` with text | the text in a `<resource uri="..." mime="...">` block; text wins when a resource carries both text and a blob |
 | `resource` with an image blob | the image |
+| `resource` with an audio blob | as an `audio` block |
 | `resource` with another blob | `[binary resource <uri>: <mime>]`, with `application/octet-stream` when the resource names no MIME type |
 | `resource` with no text or blob | `[resource omitted]` |
 | `resource_link` to a `file://` URI | `Referenced file: <path>` |
 | other `resource_link` | `Referenced resource: <uri> (<name>)` |
-| `audio` | `[audio omitted]` |
+| `audio` | a line saying an audio clip was attached, since no model is sent the bytes yet; the clip stays in the session and replays |
 | a block type this kage does not know | `[unsupported block omitted]` |
 
 Prompt text can mention MCP resources and run MCP prompts exactly as

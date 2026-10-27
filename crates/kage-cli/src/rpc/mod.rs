@@ -465,8 +465,8 @@ impl Agent for CliAcpAgent {
                 steer: true,
                 prompt_capabilities: PromptCapabilities {
                     image: true,
+                    audio: true,
                     embedded_context: true,
-                    ..PromptCapabilities::default()
                 },
                 mcp_capabilities: McpCapabilities {
                     http: true,
