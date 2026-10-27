@@ -963,9 +963,10 @@ fn fetch_image(cancel: &CancelFlag, url: &str) -> Option<ProviderEvent> {
     if !response.status().is_success() {
         return None;
     }
-    let bytes = crate::images::read_capped(
+    let bytes = crate::media::read_capped(
         response.into_body().into_reader(),
-        crate::images::MAX_RESPONSE_BYTES,
+        crate::media::MAX_RESPONSE_BYTES,
+        "the image answer",
     )
     .ok()?;
     let mime = kage_core::image::sniff_mime(&bytes)?;
@@ -1252,7 +1253,7 @@ mod tests {
 
     #[test]
     fn a_linked_picture_over_the_cap_is_refused() {
-        let mut body = vec![0; usize::try_from(crate::images::MAX_RESPONSE_BYTES + 1).unwrap()];
+        let mut body = vec![0; usize::try_from(crate::media::MAX_RESPONSE_BYTES + 1).unwrap()];
         body[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
         let events = linked_picture_events("200 OK", "content-type: image/png\r\n", body);
         assert!(

@@ -19,7 +19,8 @@ use kage_core::config::{Config, CustomProviderKind, GenerateImageConfig};
 use kage_core::{Risk, ToolMedia, ToolOutput, ToolUpdate};
 use kage_provider::ProviderError;
 use kage_provider::compat::{COMPAT_PROVIDERS, CompatKind};
-use kage_provider::images::{self, ImageEndpoint, ImageError, ImageRequest};
+use kage_provider::images::{self, ImageRequest};
+use kage_provider::media::{MediaEndpoint, MediaError};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError, ToolRegistry};
 use serde::Deserialize;
 
@@ -78,7 +79,7 @@ struct GenerateImageInput {
 /// Generate one image and hand it back as the result's media.
 #[derive(Debug)]
 pub(crate) struct GenerateImageTool {
-    endpoint: ImageEndpoint,
+    endpoint: MediaEndpoint,
     model: String,
     timeout: Duration,
 }
@@ -123,7 +124,7 @@ fn endpoint(
     cfg: &GenerateImageConfig,
     config: &Config,
     store: &AuthStore,
-) -> Result<ImageEndpoint, String> {
+) -> Result<MediaEndpoint, String> {
     if let Some(base_url) = cfg.base_url.as_deref().filter(|url| !url.trim().is_empty()) {
         let api_key = match cfg.api_key_env.as_deref().filter(|env| !env.is_empty()) {
             None => store
@@ -138,7 +139,7 @@ fn endpoint(
                     )
                 })?,
         };
-        return Ok(ImageEndpoint {
+        return Ok(MediaEndpoint {
             base_url: base_url.to_owned(),
             api_key,
             headers: cfg.headers.clone(),
@@ -159,7 +160,7 @@ fn provider_endpoint(
     id: &str,
     config: &Config,
     store: &AuthStore,
-) -> Result<ImageEndpoint, String> {
+) -> Result<MediaEndpoint, String> {
     let no_key = |env: &str| {
         if env.is_empty() {
             format!("provider `{id}` has no saved key")
@@ -179,7 +180,7 @@ fn provider_endpoint(
         } else {
             crate::providers::lookup_key_with_env(id, &env, store).ok_or_else(|| no_key(&env))?
         };
-        return Ok(ImageEndpoint {
+        return Ok(MediaEndpoint {
             base_url: custom.base_url.clone(),
             api_key,
             headers: custom.headers.clone(),
@@ -210,7 +211,7 @@ fn provider_endpoint(
         .unwrap_or_else(|| auth::env_var_for(id));
     let api_key =
         crate::providers::lookup_key_with_env(id, env, store).ok_or_else(|| no_key(env))?;
-    Ok(ImageEndpoint {
+    Ok(MediaEndpoint {
         base_url: ov
             .and_then(|o| o.base_url.clone())
             .unwrap_or_else(|| default_base.to_owned()),
@@ -310,7 +311,7 @@ impl Tool for GenerateImageTool {
         let image = match images::generate(&self.endpoint, &request, self.timeout, cx.cancel_flag())
         {
             Ok(image) => image,
-            Err(ImageError {
+            Err(MediaError {
                 error: ProviderError::Cancelled,
                 ..
             }) => return Err(ToolError::Cancelled),
@@ -416,7 +417,7 @@ fn is_size(size: &str) -> bool {
 }
 
 /// A failed generation, said so the model knows whether to try again.
-fn failure(error: &ImageError) -> ToolOutput {
+fn failure(error: &MediaError) -> ToolOutput {
     let cause = match &error.error {
         ProviderError::Http { status, body } if body.is_empty() => {
             format!("the server answered {status}")
@@ -534,9 +535,9 @@ mod tests {
 
     fn tool(base_url: &str) -> GenerateImageTool {
         GenerateImageTool {
-            endpoint: ImageEndpoint {
+            endpoint: MediaEndpoint {
                 base_url: base_url.to_owned(),
-                ..ImageEndpoint::default()
+                ..MediaEndpoint::default()
             },
             model: "image".to_owned(),
             timeout: Duration::from_secs(10),

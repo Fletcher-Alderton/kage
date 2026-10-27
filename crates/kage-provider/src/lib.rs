@@ -18,6 +18,7 @@ pub mod headers;
 pub mod http;
 pub mod images;
 pub mod interrupt;
+pub mod media;
 pub mod metadata;
 pub mod openai;
 pub mod openai_responses;
