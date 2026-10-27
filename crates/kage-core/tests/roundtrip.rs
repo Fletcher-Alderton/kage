@@ -65,6 +65,30 @@ fn all_content_variants_roundtrip() {
 }
 
 #[test]
+fn audio_blocks_roundtrip_with_base64_and_blob_sources() {
+    let blocks = [
+        Content::Audio {
+            source: MediaSource::Base64 {
+                data: "AAAA".into(),
+            },
+            mime: "audio/mpeg".into(),
+        },
+        Content::Audio {
+            source: MediaSource::Blob {
+                sha256: "a".repeat(64),
+                size: 12,
+            },
+            mime: "audio/wav".into(),
+        },
+    ];
+    for c in &blocks {
+        roundtrip(c);
+    }
+    let json = serde_json::to_value(&blocks[0]).unwrap();
+    assert_eq!(json["type"], "audio");
+}
+
+#[test]
 fn all_roles_roundtrip() {
     for r in [Role::User, Role::Assistant, Role::ToolResult, Role::System] {
         roundtrip(&r);

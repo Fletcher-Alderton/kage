@@ -248,6 +248,10 @@ pub(crate) fn render_session_markdown(replay: &kage_session::ReplayResult) -> St
                     let _ = writeln!(md, "_[image omitted: {mime}]_");
                     let _ = writeln!(md);
                 }
+                Content::Audio { mime, .. } => {
+                    let _ = writeln!(md, "_[audio omitted: {mime}]_");
+                    let _ = writeln!(md);
+                }
                 Content::Custom { kind, data } => {
                     let pretty =
                         serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());

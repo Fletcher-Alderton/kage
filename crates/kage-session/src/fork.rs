@@ -267,6 +267,10 @@ fn blob_refs(entry: &SessionEntry) -> Vec<String> {
             kage_core::Content::Image {
                 source: kage_core::MediaSource::Blob { sha256, .. },
                 ..
+            }
+            | kage_core::Content::Audio {
+                source: kage_core::MediaSource::Blob { sha256, .. },
+                ..
             } => Some(sha256.clone()),
             _ => None,
         })

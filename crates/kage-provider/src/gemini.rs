@@ -467,6 +467,9 @@ fn convert_user_parts(blocks: &[Content]) -> Vec<Value> {
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"text": text})),
             Content::Image { source, mime } => Some(image_part(source, mime)),
+            Content::Audio { mime, .. } => {
+                Some(serde_json::json!({"text": Content::audio_note(mime)}))
+            }
             _ => None,
         })
         .collect()
@@ -479,7 +482,8 @@ fn convert_user_parts(blocks: &[Content]) -> Vec<Value> {
 /// [`SKIP_SIGNATURE`] instead. Other thinking goes as `<thinking>` text.
 /// With `images`, an image the model produced goes back as inline data,
 /// carrying the signature before it; without, as a short note, and the
-/// signature is dropped so it never lands on a later call.
+/// signature is dropped so it never lands on a later call. An audio
+/// clip always goes as a short note.
 fn convert_assistant_parts(
     blocks: &[Content],
     model: &str,
@@ -525,7 +529,7 @@ fn convert_assistant_parts(
                 }
                 parts.push(part);
             }
-            Content::Image { mime, .. } => {
+            Content::Image { mime, .. } | Content::Audio { mime, .. } => {
                 signature = None;
                 parts.push(serde_json::json!({"text": Content::produced_media_note(mime)}));
             }
@@ -1436,6 +1440,56 @@ mod tests {
         assert_eq!(
             contents[1]["parts"][0]["text"],
             "[you produced an image here: image/png]"
+        );
+    }
+
+    /// Audio history goes back as its note text in every position, and
+    /// no clip's bytes are inlined.
+    #[test]
+    fn audio_becomes_note_text_and_never_inlines_bytes() {
+        let audio = || kage_core::Content::Audio {
+            source: kage_core::MediaSource::Base64 {
+                data: "QUJD".into(),
+            },
+            mime: "audio/mpeg".into(),
+        };
+        let req = StreamRequest::new(
+            "gemini-2.5-pro",
+            vec![
+                Arc::new(Message::new(Role::User, vec![audio()], None)),
+                Arc::new(Message::new(Role::Assistant, vec![audio()], None)),
+                Arc::new(Message::new(
+                    Role::ToolResult,
+                    vec![
+                        Content::ToolResultBlock {
+                            call_id: ToolCallId::new("c1"),
+                            output: "clipped".into(),
+                            is_error: false,
+                        },
+                        audio(),
+                    ],
+                    None,
+                )),
+            ],
+        );
+        let body = build_request_body(&req);
+        let text = body.to_string();
+        assert!(!text.contains("QUJD"), "audio bytes leaked: {text}");
+        assert!(!text.contains("inlineData"), "audio inlined: {text}");
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents[0]["role"], "user");
+        assert_eq!(
+            contents[0]["parts"][0]["text"],
+            Content::audio_note("audio/mpeg")
+        );
+        assert_eq!(contents[1]["role"], "model");
+        assert_eq!(
+            contents[1]["parts"][0]["text"],
+            Content::produced_media_note("audio/mpeg")
+        );
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["response"]["output"],
+            format!("clipped\n{}", Content::audio_note("audio/mpeg"))
         );
     }
 

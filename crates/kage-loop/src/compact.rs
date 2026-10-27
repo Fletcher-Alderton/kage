@@ -543,6 +543,9 @@ fn serialize_conversation(messages: &[Arc<Message>]) -> String {
                 Content::Image { mime, .. } => {
                     let _ = writeln!(out, "[image {mime}]");
                 }
+                Content::Audio { mime, .. } => {
+                    let _ = writeln!(out, "[audio {mime}]");
+                }
                 Content::Custom { kind, data } => {
                     let _ = writeln!(out, "[custom {kind}] {data}");
                 }
@@ -1409,6 +1412,49 @@ mod tests {
         assert!(out.contains("=== assistant ==="));
         assert!(out.contains("hello"));
         assert!(out.contains("hi back"));
+    }
+
+    /// A kept audio clip is transcribed as its note line, and it costs
+    /// the estimate no more than that line's own text would: it is not
+    /// billed as an image.
+    #[test]
+    fn an_audio_block_is_transcribed_and_not_counted_as_an_image() {
+        let history_with = |extra: Option<Content>| {
+            let mut cx = AgentContext::new("mock:m", "");
+            cx.history.push(Arc::new(user_msg("cut a clip")));
+            let mut content = vec![Content::Text {
+                text: "done".into(),
+            }];
+            if let Some(block) = extra {
+                content.push(block);
+            }
+            cx.history
+                .push(Arc::new(Message::new(Role::Assistant, content, None)));
+            cx
+        };
+        let audio = || Content::Audio {
+            source: kage_core::MediaSource::Base64 {
+                data: "QUJD".into(),
+            },
+            mime: "audio/mpeg".into(),
+        };
+
+        let transcript = serialize_conversation(&history_with(Some(audio())).history);
+        assert!(transcript.contains("[audio audio/mpeg]"), "{transcript}");
+
+        let base = || estimate_next_input(&history_with(None));
+        let audio_delta = estimate_next_input(&history_with(Some(audio()))) - base();
+        let note_delta = estimate_next_input(&history_with(Some(Content::Text {
+            text: "[audio audio/mpeg]".into(),
+        }))) - base();
+        assert!(
+            audio_delta <= note_delta,
+            "the audio block cost more than its note: {audio_delta} vs {note_delta}"
+        );
+        assert!(
+            audio_delta < IMAGE_TOKENS,
+            "the audio block was billed as an image: {audio_delta}"
+        );
     }
 
     fn overflow_rejection() -> kage_provider::ProviderError {

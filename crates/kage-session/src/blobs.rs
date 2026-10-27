@@ -4,9 +4,9 @@
 //! A session file names a blob by the sha256 of its bytes
 //! ([`MediaSource::Blob`]). The bytes live at
 //! `<sessions>/blobs/sha256/<first two hex digits>/<hash>`, shared by
-//! every session in the directory, so a fork or an image sent twice
-//! costs nothing more. Blobs are private to the user, like the session
-//! files.
+//! every session in the directory, so a fork or the same media sent
+//! twice costs nothing more. Blobs are private to the user, like the
+//! session files.
 //!
 //! [`crate::SessionWriter::append`] moves inline media of at least
 //! [`INLINE_MAX`] bytes here and writes the reference, and
@@ -24,6 +24,16 @@ use sha2::{Digest as _, Sha256};
 pub const INLINE_MAX: usize = 16 * 1024;
 
 const BASE64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
+
+/// Replaces the media source of `block` in place when it is an image
+/// or an audio clip, keeping its kind and mime. Images and clips move
+/// through the blob store the same way, so externalize and hydrate
+/// rebuild blocks through this one helper.
+fn set_source(block: &mut Content, source: MediaSource) {
+    if let Content::Image { source: slot, .. } | Content::Audio { source: slot, .. } = block {
+        *slot = source;
+    }
+}
 
 /// The blobs of one sessions directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,10 +104,14 @@ impl BlobStore {
     pub fn externalize(&self, message: &Message) -> std::io::Result<Option<Message>> {
         let mut out: Option<Message> = None;
         for (i, block) in message.content.iter().enumerate() {
-            let Content::Image {
+            let (Content::Image {
                 source: MediaSource::Base64 { data },
-                mime,
-            } = block
+                ..
+            }
+            | Content::Audio {
+                source: MediaSource::Base64 { data },
+                ..
+            }) = block
             else {
                 continue;
             };
@@ -108,13 +122,14 @@ impl BlobStore {
                 continue;
             };
             let sha256 = self.put(&bytes)?;
-            out.get_or_insert_with(|| message.clone()).content[i] = Content::Image {
-                source: MediaSource::Blob {
+            let slot = &mut out.get_or_insert_with(|| message.clone()).content[i];
+            set_source(
+                slot,
+                MediaSource::Blob {
                     sha256,
                     size: bytes.len() as u64,
                 },
-                mime: mime.clone(),
-            };
+            );
         }
         Ok(out)
     }
@@ -125,22 +140,27 @@ impl BlobStore {
     pub fn hydrate(&self, message: &Message) -> Option<Message> {
         let mut out: Option<Message> = None;
         for (i, block) in message.content.iter().enumerate() {
-            let Content::Image {
+            let (Content::Image {
                 source: MediaSource::Blob { sha256, .. },
-                mime,
-            } = block
+                ..
+            }
+            | Content::Audio {
+                source: MediaSource::Blob { sha256, .. },
+                ..
+            }) = block
             else {
                 continue;
             };
             let Some(bytes) = self.get(sha256) else {
                 continue;
             };
-            out.get_or_insert_with(|| message.clone()).content[i] = Content::Image {
-                source: MediaSource::Base64 {
+            let slot = &mut out.get_or_insert_with(|| message.clone()).content[i];
+            set_source(
+                slot,
+                MediaSource::Base64 {
                     data: BASE64.encode(bytes),
                 },
-                mime: mime.clone(),
-            };
+            );
         }
         out
     }
@@ -178,6 +198,15 @@ mod tests {
                 data: BASE64.encode(bytes),
             },
             mime: "image/png".into(),
+        }
+    }
+
+    fn audio(bytes: &[u8]) -> Content {
+        Content::Audio {
+            source: MediaSource::Base64 {
+                data: BASE64.encode(bytes),
+            },
+            mime: "audio/mpeg".into(),
         }
     }
 
@@ -251,6 +280,27 @@ mod tests {
     }
 
     #[test]
+    fn audio_moves_to_a_blob_and_back_like_an_image() {
+        let dir = tempdir().unwrap();
+        let store = BlobStore::beside(&dir.path().join("s.jsonl"));
+        let big = vec![5u8; INLINE_MAX + 1];
+        let message = Message::new(Role::Assistant, vec![audio(&big)], None);
+
+        let external = store.externalize(&message).unwrap().unwrap();
+        let Content::Audio { source, mime } = &external.content[0] else {
+            panic!("{external:?}")
+        };
+        let MediaSource::Blob { sha256, size } = source else {
+            panic!("{source:?}")
+        };
+        assert_eq!(mime, "audio/mpeg");
+        assert_eq!(*size, big.len() as u64);
+        assert_eq!(store.get(sha256).unwrap(), big);
+
+        assert_eq!(store.hydrate(&external).unwrap(), message);
+    }
+
+    #[test]
     fn a_snapshot_written_elsewhere_brings_its_blobs() {
         let from = tempdir().unwrap();
         let to = tempdir().unwrap();
@@ -265,6 +315,23 @@ mod tests {
         let dst = to.path().join("copy.jsonl");
         drop(snapshot.write(&dst, header()).unwrap());
         assert_eq!(messages(&dst)[0].content[0], image(&big));
+    }
+
+    #[test]
+    fn a_snapshot_written_elsewhere_brings_its_audio_blobs() {
+        let from = tempdir().unwrap();
+        let to = tempdir().unwrap();
+        let src = from.path().join("s.jsonl");
+        let big = vec![3u8; INLINE_MAX + 10];
+        let mut writer = SessionWriter::create(&src, header()).unwrap();
+        writer.append(&entry(vec![audio(&big)])).unwrap();
+        drop(writer);
+
+        let snapshot = crate::snapshot(&src, |_| true).unwrap();
+        assert_eq!(snapshot.blob_refs.len(), 1);
+        let dst = to.path().join("copy.jsonl");
+        drop(snapshot.write(&dst, header()).unwrap());
+        assert_eq!(messages(&dst)[0].content[0], audio(&big));
     }
 
     #[cfg(unix)]

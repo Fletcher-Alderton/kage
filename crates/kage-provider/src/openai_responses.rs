@@ -407,6 +407,10 @@ fn convert_user_parts(blocks: &[Content]) -> Vec<Value> {
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"input_text","text":text})),
             Content::Image { source, mime } => Some(image_part(source, mime)),
+            Content::Audio { mime, .. } => Some(serde_json::json!({
+                "type":"input_text",
+                "text": Content::audio_note(mime),
+            })),
             _ => None,
         })
         .collect()
@@ -422,7 +426,7 @@ fn convert_assistant_items(blocks: &[Content], model: &str) -> Vec<Value> {
             Content::Text { text } => {
                 text_parts.push(serde_json::json!({"type":"output_text","text":text}));
             }
-            Content::Image { mime, .. } => {
+            Content::Image { mime, .. } | Content::Audio { mime, .. } => {
                 let text = Content::produced_media_note(mime);
                 text_parts.push(serde_json::json!({"type":"output_text","text":text}));
             }
@@ -1411,6 +1415,57 @@ mod tests {
             "data:image/webp;base64,QUJD"
         );
         assert_eq!(data_url(&[image("")]), "data:image/png;base64,QUJD");
+    }
+
+    /// Audio history goes back as its note text in every position, and
+    /// no clip's bytes ride the request.
+    #[test]
+    fn audio_becomes_note_text_and_never_carries_its_bytes() {
+        let audio = || Content::Audio {
+            source: kage_core::MediaSource::Base64 {
+                data: "QUJD".into(),
+            },
+            mime: "audio/mpeg".into(),
+        };
+        let req = StreamRequest::new(
+            "gpt-5",
+            vec![
+                Arc::new(Message::new(Role::User, vec![audio()], None)),
+                Arc::new(Message::new(Role::Assistant, vec![audio()], None)),
+                Arc::new(Message::new(
+                    Role::ToolResult,
+                    vec![
+                        Content::ToolResultBlock {
+                            call_id: ToolCallId::new("c1"),
+                            output: "clipped".into(),
+                            is_error: false,
+                        },
+                        audio(),
+                    ],
+                    None,
+                )),
+            ],
+        );
+        let body = build_request_body(&req, true);
+        let text = body.to_string();
+        assert!(!text.contains("QUJD"), "audio bytes leaked: {text}");
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(
+            input[0]["content"][0],
+            serde_json::json!({"type": "input_text", "text": Content::audio_note("audio/mpeg")})
+        );
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(
+            input[1]["content"][0],
+            serde_json::json!({"type": "output_text", "text": Content::produced_media_note("audio/mpeg")})
+        );
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(
+            input[2]["output"],
+            format!("clipped\n{}", Content::audio_note("audio/mpeg"))
+        );
     }
 
     /// Argument deltas that arrive before their `output_item.added`

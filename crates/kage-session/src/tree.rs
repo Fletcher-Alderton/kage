@@ -569,6 +569,21 @@ mod tests {
     }
 
     #[test]
+    fn a_version_two_file_still_reads_as_a_linear_tree() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("v2.jsonl");
+        let mut header = fresh_header();
+        header.version = 2;
+        let a = message_entry(Role::User, "a");
+        let b = message_entry(Role::Assistant, "b");
+        write(&path, header.clone(), &[a.clone(), b.clone()]);
+
+        let tree = SessionTree::read(&path).unwrap();
+        assert!(tree.is_active(a.id()) && tree.is_active(b.id()));
+        assert_eq!(tree.parent(a.id()), Some(header.id));
+    }
+
+    #[test]
     fn structural_failures_match_replays() {
         let dir = tempdir().unwrap();
         let empty = dir.path().join("empty.jsonl");

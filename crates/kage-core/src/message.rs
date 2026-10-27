@@ -99,6 +99,14 @@ pub enum Content {
         /// MIME type, for example `image/png`.
         mime: String,
     },
+    /// An audio clip attached to the message.
+    Audio {
+        /// Where the clip's bytes live: a URL, inline base64, or the
+        /// session blob store.
+        source: MediaSource,
+        /// MIME type, for example `audio/mpeg`.
+        mime: String,
+    },
     /// A request from the model to invoke a tool.
     ToolCall {
         /// Provider-issued correlation id.
@@ -129,11 +137,23 @@ pub enum Content {
 }
 
 impl Content {
-    /// The text an image the model produced stands as when its own
-    /// history goes back to a provider that is not sent the bytes.
+    /// The text an image or audio clip the model produced stands as
+    /// when its own history goes back to a provider that is not sent
+    /// the bytes.
     #[must_use]
     pub fn produced_media_note(mime: &str) -> String {
-        format!("[you produced an image here: {mime}]")
+        if mime.starts_with("audio/") {
+            format!("[you produced audio here: {mime}]")
+        } else {
+            format!("[you produced an image here: {mime}]")
+        }
+    }
+
+    /// The text an audio clip stands as in a user or tool-result
+    /// position: no model is sent audio yet, so the bytes stay behind.
+    #[must_use]
+    pub fn audio_note(mime: &str) -> String {
+        format!("[an audio clip ({mime}) was here; it is not sent to the model]")
     }
 
     /// Thinking `text` framed as `<thinking>` text, the form kage sends
@@ -220,11 +240,13 @@ pub struct ToolResultParts<'a> {
     pub is_error: bool,
     /// The images the tool produced, as `(source, mime)`.
     pub media: Vec<(&'a MediaSource, &'a str)>,
+    /// The mimes of the audio clips the tool produced.
+    pub audio: Vec<&'a str>,
 }
 
 impl ToolResultParts<'_> {
-    /// The result text, with a note for each image after it, for a
-    /// provider that cannot take images in a tool result.
+    /// The result text, with a note for each image and clip after it,
+    /// for a provider that cannot take media in a tool result.
     #[must_use]
     pub fn text_with_media_notes(&self) -> String {
         use std::fmt::Write as _;
@@ -235,11 +257,15 @@ impl ToolResultParts<'_> {
                 "\n[the tool produced an image ({mime}), not shown here]"
             );
         }
+        for mime in &self.audio {
+            let _ = write!(text, "\n{}", Content::audio_note(mime));
+        }
         text
     }
 }
 
-/// The tool results in `blocks`, each with the images that follow it.
+/// The tool results in `blocks`, each with the images and clips that
+/// follow it.
 #[must_use]
 pub fn tool_results(blocks: &[Content]) -> Vec<ToolResultParts<'_>> {
     let mut out: Vec<ToolResultParts<'_>> = Vec::new();
@@ -254,10 +280,16 @@ pub fn tool_results(blocks: &[Content]) -> Vec<ToolResultParts<'_>> {
                 output,
                 is_error: *is_error,
                 media: Vec::new(),
+                audio: Vec::new(),
             }),
             Content::Image { source, mime } => {
                 if let Some(last) = out.last_mut() {
                     last.media.push((source, mime));
+                }
+            }
+            Content::Audio { mime, .. } => {
+                if let Some(last) = out.last_mut() {
+                    last.audio.push(mime);
                 }
             }
             _ => {}
@@ -562,6 +594,22 @@ mod tests {
             Some("<thinking>\nwhy\n</thinking>")
         );
         assert_eq!(Content::flattened_thinking("  "), None);
+    }
+
+    #[test]
+    fn media_notes_name_audio_and_images() {
+        assert_eq!(
+            Content::produced_media_note("image/png"),
+            "[you produced an image here: image/png]"
+        );
+        assert_eq!(
+            Content::produced_media_note("audio/mpeg"),
+            "[you produced audio here: audio/mpeg]"
+        );
+        assert_eq!(
+            Content::audio_note("audio/mpeg"),
+            "[an audio clip (audio/mpeg) was here; it is not sent to the model]"
+        );
     }
 
     #[test]

@@ -397,6 +397,10 @@ fn convert_user_blocks(blocks: &[Content]) -> Vec<Value> {
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"text","text":text})),
             Content::Image { source, mime } => Some(image_to_openai(source, mime)),
+            Content::Audio { mime, .. } => Some(serde_json::json!({
+                "type":"text",
+                "text": Content::audio_note(mime),
+            })),
             _ => None,
         })
         .collect()
@@ -410,7 +414,9 @@ fn convert_assistant_message(blocks: &[Content], replay: ThinkingReplay, model: 
     for block in blocks {
         match block {
             Content::Text { text } => text_parts.push(text.clone()),
-            Content::Image { mime, .. } => text_parts.push(Content::produced_media_note(mime)),
+            Content::Image { mime, .. } | Content::Audio { mime, .. } => {
+                text_parts.push(Content::produced_media_note(mime));
+            }
             Content::Thinking {
                 text, signature, ..
             } => match replay {
@@ -1065,6 +1071,56 @@ mod tests {
         assert_eq!(
             body["messages"][0]["content"],
             "drawn\n[the tool produced an image (image/png), not shown here]"
+        );
+    }
+
+    /// Audio history goes back as its note text in every position, and
+    /// no clip's bytes ride the request.
+    #[test]
+    fn audio_becomes_note_text_and_never_carries_its_bytes() {
+        let audio = || Content::Audio {
+            source: kage_core::MediaSource::Base64 {
+                data: "QUJD".into(),
+            },
+            mime: "audio/mpeg".into(),
+        };
+        let req = StreamRequest::new(
+            "gpt-5",
+            vec![
+                Arc::new(Message::new(Role::User, vec![audio()], None)),
+                Arc::new(Message::new(Role::Assistant, vec![audio()], None)),
+                Arc::new(Message::new(
+                    Role::ToolResult,
+                    vec![
+                        Content::ToolResultBlock {
+                            call_id: ToolCallId::new("c1"),
+                            output: "clipped".into(),
+                            is_error: false,
+                        },
+                        audio(),
+                    ],
+                    None,
+                )),
+            ],
+        );
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
+        let text = body.to_string();
+        assert!(!text.contains("QUJD"), "audio bytes leaked: {text}");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(
+            messages[0]["content"][0],
+            serde_json::json!({"type": "text", "text": Content::audio_note("audio/mpeg")})
+        );
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(
+            messages[1]["content"],
+            Content::produced_media_note("audio/mpeg")
+        );
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(
+            messages[2]["content"],
+            format!("clipped\n{}", Content::audio_note("audio/mpeg"))
         );
     }
 

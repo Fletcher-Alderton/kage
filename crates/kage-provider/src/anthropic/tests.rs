@@ -949,3 +949,54 @@ fn a_tool_s_images_go_inside_its_tool_result() {
     assert_eq!(content[1]["type"], "image");
     assert_eq!(content[1]["source"]["data"], "iVBO");
 }
+
+/// Audio history goes back as its note text in every position, and no
+/// clip's bytes ride the request.
+#[test]
+fn audio_becomes_note_text_and_never_carries_its_bytes() {
+    let audio = || kage_core::Content::Audio {
+        source: kage_core::MediaSource::Base64 {
+            data: "QUJD".into(),
+        },
+        mime: "audio/mpeg".into(),
+    };
+    let req = StreamRequest::new(
+        "claude-sonnet-4-6",
+        vec![
+            Arc::new(Message::new(Role::User, vec![audio()], None)),
+            Arc::new(Message::new(Role::Assistant, vec![audio()], None)),
+            Arc::new(Message::new(
+                Role::ToolResult,
+                vec![
+                    Content::ToolResultBlock {
+                        call_id: kage_core::ToolCallId::new("c1"),
+                        output: "clipped".into(),
+                        is_error: false,
+                    },
+                    audio(),
+                ],
+                None,
+            )),
+        ],
+    );
+    let body = build_request_body(&req, false);
+    let text = body.to_string();
+    assert!(!text.contains("QUJD"), "audio bytes leaked: {text}");
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(
+        messages[0]["content"][0],
+        serde_json::json!({"type": "text", "text": Content::audio_note("audio/mpeg")})
+    );
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(
+        messages[1]["content"][0]["text"],
+        Content::produced_media_note("audio/mpeg")
+    );
+    let content = &messages[2]["content"][0]["content"];
+    assert_eq!(
+        content[0],
+        serde_json::json!({"type": "text", "text": "clipped"})
+    );
+    assert_eq!(content[1]["text"], Content::audio_note("audio/mpeg"));
+}

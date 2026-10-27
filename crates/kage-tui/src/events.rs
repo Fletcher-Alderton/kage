@@ -435,6 +435,7 @@ fn push_replayed_message(buf: &mut Buffer, msg: &Arc<Message>, tool_durations: &
                         buf.push_custom("kage:image", produced_media_label(mime, bytes), false);
                     }
                     Content::Thinking { .. }
+                    | Content::Audio { .. }
                     | Content::ToolResultBlock { .. }
                     | Content::Custom { .. } => {}
                 }

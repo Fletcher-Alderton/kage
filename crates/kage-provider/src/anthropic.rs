@@ -312,6 +312,10 @@ fn convert_user_blocks(blocks: &[Content]) -> Vec<Value> {
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"text","text":text})),
             Content::Image { source, mime } => Some(image_to_anthropic(source, mime)),
+            Content::Audio { mime, .. } => Some(serde_json::json!({
+                "type": "text",
+                "text": Content::audio_note(mime),
+            })),
             _ => None,
         })
         .collect()
@@ -326,7 +330,7 @@ fn convert_assistant_blocks(blocks: &[Content], model: &str) -> Vec<Value> {
         .iter()
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"text","text":text})),
-            Content::Image { mime, .. } => Some(serde_json::json!({
+            Content::Image { mime, .. } | Content::Audio { mime, .. } => Some(serde_json::json!({
                 "type": "text",
                 "text": Content::produced_media_note(mime),
             })),
@@ -373,12 +377,13 @@ fn is_claude_model(model: &str) -> bool {
 }
 
 /// Tool results on the wire. Images a tool produced go inside its
-/// `tool_result`, which Anthropic accepts, so the model sees them.
+/// `tool_result`, which Anthropic accepts, so the model sees them;
+/// clips stand as their note text.
 fn convert_tool_result_blocks(blocks: &[Content]) -> Vec<Value> {
     kage_core::tool_results(blocks)
         .iter()
         .map(|result| {
-            let content = if result.media.is_empty() {
+            let content = if result.media.is_empty() && result.audio.is_empty() {
                 Value::String(result.output.to_owned())
             } else {
                 let mut parts = Vec::new();
@@ -387,6 +392,12 @@ fn convert_tool_result_blocks(blocks: &[Content]) -> Vec<Value> {
                 }
                 for (source, mime) in &result.media {
                     parts.push(image_to_anthropic(source, mime));
+                }
+                for mime in &result.audio {
+                    parts.push(serde_json::json!({
+                        "type": "text",
+                        "text": Content::audio_note(mime),
+                    }));
                 }
                 Value::Array(parts)
             };

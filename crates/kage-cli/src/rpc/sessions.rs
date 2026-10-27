@@ -766,7 +766,7 @@ fn replay_event(id: MessageId, block: &Content) -> Option<LoopEvent> {
                 delta: source.missing_note(mime).unwrap_or_default(),
             },
         }),
-        Content::Custom { .. } => None,
+        Content::Audio { .. } | Content::Custom { .. } => None,
     }
 }
 

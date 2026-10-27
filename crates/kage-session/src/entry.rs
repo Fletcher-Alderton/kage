@@ -22,8 +22,9 @@ use ulid::Ulid;
 /// Bumped whenever the entry schema changes in a non-additive way. Readers
 /// accept the versions whose entries they all interpret: version 2 added
 /// the [`SessionEntry::Branch`] marker, which version 1 readers must not
-/// see.
-pub const FORMAT_VERSION: u32 = 2;
+/// see, and version 3 added `Content::Audio`, which version 2 readers
+/// cannot decode.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Stable identifier for a single entry within a session.
 ///
@@ -414,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn format_version_is_two() {
-        assert_eq!(FORMAT_VERSION, 2);
+    fn format_version_is_three() {
+        assert_eq!(FORMAT_VERSION, 3);
     }
 }
