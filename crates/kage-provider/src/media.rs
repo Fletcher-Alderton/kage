@@ -183,6 +183,54 @@ fn over_time(error: ProviderError, deadline: Instant, timeout: Duration) -> Prov
     }
 }
 
+/// The scheme and host of `url`, without a path: the origin a linked
+/// answer must come from.
+pub(crate) fn origin(url: &str) -> String {
+    let after_scheme = url.find("://").map_or(0, |at| at + 3);
+    let end = url[after_scheme..]
+        .find('/')
+        .map_or(url.len(), |at| after_scheme + at);
+    url[..end].to_owned()
+}
+
+/// Fetch the answer a server linked at `url`, within the call's
+/// remaining deadline, and without a credential.
+///
+/// A redirect is not followed, since only `url` itself was checked
+/// against the origin the caller trusts. A body over
+/// [`MAX_RESPONSE_BYTES`] is refused rather than cut short.
+pub(crate) fn fetch_link(
+    url: &str,
+    noun: &'static str,
+    deadline: Instant,
+    timeout: Duration,
+    cancel: &CancelFlag,
+) -> Result<Vec<u8>, ProviderError> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(ProviderError::Transport(format!(
+            "no answer within {}s",
+            timeout.as_secs()
+        )));
+    }
+    let late = |error: ProviderError| over_time(error, deadline, timeout);
+    let (response, kill) = crate::http::send_within(cancel, url.to_owned(), left, |agent, url| {
+        agent.get(url).config().max_redirects(0).build().call()
+    })
+    .map_err(late)?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(ProviderError::Http {
+            status,
+            body: format!("fetching {noun} from its link"),
+        });
+    }
+    crate::cancelable::cancellable_call(cancel, &kill, move || {
+        read_capped(response.into_body().into_reader(), MAX_RESPONSE_BYTES, noun)
+    })
+    .map_err(late)
+}
+
 /// Read all of `reader`, refusing a body longer than `cap`.
 pub(crate) fn read_capped(
     reader: impl std::io::Read,

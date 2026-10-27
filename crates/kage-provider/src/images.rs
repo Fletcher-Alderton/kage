@@ -12,9 +12,11 @@
 //! The image's bytes are asked for (`response_format` is `b64_json`).
 //! `OpenAI`'s GPT image models always answer base64 and refuse that
 //! parameter, so a refusal that names it is asked again without it. A
-//! server that answers a `data:` URI in `url` is read as well. A server
-//! that answers an `http(s)` link is refused rather than followed:
-//! fetching it would be a second request to a host nobody configured.
+//! server that answers a `data:` URI in `url` is read as well, and so is
+//! an `http(s)` link on the endpoint's own origin, fetched without the
+//! key and without following a redirect. A link anywhere else is refused
+//! rather than followed: fetching it would be a request to a host nobody
+//! configured.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -87,9 +89,9 @@ pub struct ImageEdit {
 ///   [`ProviderError::Http`] for a refusal, carrying the server's
 ///   message.
 /// - [`ProviderError::Decode`] for an answer that holds no image this
-///   client reads: no `data`, a link instead of bytes, bad base64, a
-///   body over [`media::MAX_RESPONSE_BYTES`], or bytes that are not a PNG,
-///   JPEG, GIF or WebP image.
+///   client reads: no `data`, a link off the endpoint's origin, bad
+///   base64, a body over [`media::MAX_RESPONSE_BYTES`], or bytes that are
+///   not a PNG, JPEG, GIF or WebP image.
 pub fn generate(
     endpoint: &MediaEndpoint,
     request: &ImageRequest,
@@ -148,7 +150,9 @@ fn post(
         timeout,
         cancel,
     )?;
-    Ok(parse_answer(&body)?)
+    Ok(parse_answer(&body, |url| {
+        fetch_on_origin(endpoint, url, deadline, timeout, cancel)
+    })?)
 }
 
 /// Edit one image from a prompt, waiting at most `timeout` for the
@@ -171,9 +175,9 @@ fn post(
 ///   [`ProviderError::Http`] for a refusal, carrying the server's
 ///   message.
 /// - [`ProviderError::Decode`] for an answer that holds no image this
-///   client reads: no `data`, a link instead of bytes, bad base64, a
-///   body over [`media::MAX_RESPONSE_BYTES`], or bytes that are not a
-///   PNG, JPEG, GIF or WebP image.
+///   client reads: no `data`, a link off the endpoint's origin, bad
+///   base64, a body over [`media::MAX_RESPONSE_BYTES`], or bytes that are
+///   not a PNG, JPEG, GIF or WebP image.
 pub fn edit(
     endpoint: &MediaEndpoint,
     edit: &ImageEdit,
@@ -244,11 +248,37 @@ fn post_edit(
         timeout,
         cancel,
     )?;
-    Ok(parse_answer(&body)?)
+    Ok(parse_answer(&body, |url| {
+        fetch_on_origin(endpoint, url, deadline, timeout, cancel)
+    })?)
 }
 
-/// The image in an answer's first `data` entry.
-fn parse_answer(body: &[u8]) -> Result<GeneratedImage, ProviderError> {
+/// The image a server linked at `url`, when the link is on the
+/// endpoint's own origin, read within the call's deadline.
+fn fetch_on_origin(
+    endpoint: &MediaEndpoint,
+    url: &str,
+    deadline: Instant,
+    timeout: Duration,
+    cancel: &CancelFlag,
+) -> Result<Vec<u8>, ProviderError> {
+    let origin = media::origin(endpoint.base_url.trim());
+    if !url.starts_with(&format!("{origin}/")) {
+        return Err(ProviderError::Decode(
+            "the server answered a link to the image on another host, \
+             and kage does not fetch it"
+                .to_owned(),
+        ));
+    }
+    media::fetch_link(url, "the image answer", deadline, timeout, cancel)
+}
+
+/// The image in an answer's first `data` entry. A `url` that is not a
+/// `data:` URI is handed to `fetch_link`.
+fn parse_answer(
+    body: &[u8],
+    fetch_link: impl FnOnce(&str) -> Result<Vec<u8>, ProviderError>,
+) -> Result<GeneratedImage, ProviderError> {
     let json: serde_json::Value = serde_json::from_slice(body)
         .map_err(|e| ProviderError::Decode(format!("the image answer is not JSON: {e}")))?;
     let first = json
@@ -259,13 +289,7 @@ fn parse_answer(body: &[u8]) -> Result<GeneratedImage, ProviderError> {
     } else if let Some(url) = first.get("url").and_then(serde_json::Value::as_str) {
         match url.strip_prefix("data:") {
             Some(uri) => decode_data_uri(uri)?,
-            None => {
-                return Err(ProviderError::Decode(
-                    "the server answered a link to the image instead of its bytes, \
-                     and kage does not fetch it"
-                        .to_owned(),
-                ));
-            }
+            None => fetch_link(url)?,
         }
     } else {
         return Err(ProviderError::Decode(
@@ -454,14 +478,173 @@ mod tests {
         assert!(!sent.contains("\"size\""), "{sent}");
     }
 
+    /// The fetch for an answer that must not link anywhere.
+    fn no_fetch(url: &str) -> Result<Vec<u8>, ProviderError> {
+        panic!("fetched {url}")
+    }
+
+    /// Answer a generation with a link to `path` on the same server, then
+    /// answer the fetch of that link with `status`, `headers` and `body`.
+    /// Returns both requests.
+    fn serve_link(
+        listener: TcpListener,
+        path: &'static str,
+        status: &'static str,
+        headers: &'static str,
+        body: &'static [u8],
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let first = String::from_utf8_lossy(&crate::testing::read_request_bytes(&mut conn))
+                .into_owned();
+            let json = format!(r#"{{"data":[{{"url":"{origin}{path}"}}]}}"#);
+            let answer = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{json}",
+                json.len()
+            );
+            conn.write_all(answer.as_bytes()).unwrap();
+            drop(conn);
+            let (mut conn, _) = listener.accept().unwrap();
+            let second = crate::testing::read_request(&mut conn);
+            let answer = format!(
+                "HTTP/1.1 {status}\r\n{headers}content-length: {}\r\n\
+                 connection: close\r\n\r\n",
+                body.len()
+            );
+            conn.write_all(answer.as_bytes()).unwrap();
+            conn.write_all(body).unwrap();
+            vec![first, second]
+        })
+    }
+
     #[test]
-    fn reads_a_data_uri_and_refuses_a_link() {
+    fn a_link_on_the_endpoint_origin_is_fetched_without_the_key() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_link(listener, "/f/a.png", "200 OK", "", PNG);
+        let image = generate(
+            &endpoint(format!("http://{addr}/v1")),
+            &request(),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &AtomicBool::new(true),
+        )
+        .unwrap();
+        assert_eq!(image.bytes, PNG);
+        let requests = server.join().unwrap();
+        let fetch = requests[1].to_lowercase();
+        assert!(fetch.starts_with("get /f/a.png "), "{fetch}");
+        assert!(!fetch.contains("authorization:"), "{fetch}");
+        assert!(!fetch.contains("x-team:"), "{fetch}");
+    }
+
+    #[test]
+    fn a_redirect_from_a_linked_image_is_not_followed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_link(
+            listener,
+            "/f/a.png",
+            "302 Found",
+            "location: http://elsewhere.test/a.png\r\n",
+            b"",
+        );
+        let err = generate(
+            &endpoint(format!("http://{addr}/v1")),
+            &request(),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err.error, ProviderError::Http { status: 302, .. }),
+            "{err:?}"
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_link_that_only_starts_like_the_origin_is_refused() {
+        let endpoint = endpoint("https://img.test/v1".to_owned());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for url in [
+            "https://img.test.evil/a.png",
+            "https://img.test",
+            "https://img.test@evil.test/a.png",
+            "https://img.test:8443/a.png",
+            "http://img.test/a.png",
+        ] {
+            let err = fetch_on_origin(
+                &endpoint,
+                url,
+                deadline,
+                Duration::from_secs(10),
+                &CancelFlag::new(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, ProviderError::Decode(m) if m.contains("another host")),
+                "{url}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edit_answered_with_a_link_on_the_origin_is_fetched() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_link(listener, "/f/b.png", "200 OK", "", PNG);
+        let image = edit(
+            &endpoint(format!("http://{addr}/v1")),
+            &edit_request(None),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &AtomicBool::new(true),
+        )
+        .unwrap();
+        assert_eq!(image.bytes, PNG);
+        let requests = server.join().unwrap();
+        assert!(requests[1].to_lowercase().starts_with("get /f/b.png "));
+    }
+
+    #[test]
+    fn a_link_on_another_host_is_refused_unfetched() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_each(
+            listener,
+            vec![(
+                "200 OK",
+                r#"{"data":[{"url":"https://images.example.com/a.png"}]}"#.to_owned(),
+            )],
+        );
+        let err = generate(
+            &endpoint(format!("http://{addr}/v1")),
+            &request(),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err.error, ProviderError::Decode(m) if m.contains("another host")),
+            "{err:?}"
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reads_a_data_uri() {
         let png = parse_answer(
             format!(
                 r#"{{"data":[{{"url":"data:image/jpeg;base64,{}"}}]}}"#,
                 png_base64()
             )
             .as_bytes(),
+            no_fetch,
         )
         .unwrap();
         assert_eq!(
@@ -469,13 +652,8 @@ mod tests {
             "the bytes say PNG whatever the URI claims"
         );
 
-        let link =
-            parse_answer(br#"{"data":[{"url":"https://images.example.com/a.png"}]}"#).unwrap_err();
-        assert!(
-            matches!(&link, ProviderError::Decode(m) if m.contains("link")),
-            "{link:?}"
-        );
-        let plain = parse_answer(br#"{"data":[{"url":"data:image/png,abc"}]}"#).unwrap_err();
+        let plain =
+            parse_answer(br#"{"data":[{"url":"data:image/png,abc"}]}"#, no_fetch).unwrap_err();
         assert!(matches!(plain, ProviderError::Decode(_)), "{plain:?}");
     }
 
@@ -487,18 +665,21 @@ mod tests {
             br#"{"data":[{"b64_json":"!!!"}]}"#,
             b"not json",
         ] {
-            let err = parse_answer(body).unwrap_err();
+            let err = parse_answer(body, no_fetch).unwrap_err();
             assert!(matches!(err, ProviderError::Decode(_)), "{err:?}");
         }
         let text = base64::engine::general_purpose::STANDARD.encode("just text");
-        let err = parse_answer(format!(r#"{{"data":[{{"b64_json":"{text}"}}]}}"#).as_bytes())
-            .unwrap_err();
+        let err = parse_answer(
+            format!(r#"{{"data":[{{"b64_json":"{text}"}}]}}"#).as_bytes(),
+            no_fetch,
+        )
+        .unwrap_err();
         assert!(
             matches!(&err, ProviderError::Decode(m) if m.contains("not a PNG")),
             "{err:?}"
         );
         let wrapped = format!(r#"{{"data":[{{"b64_json":"{}\n"}}]}}"#, png_base64());
-        assert!(parse_answer(wrapped.as_bytes()).is_ok());
+        assert!(parse_answer(wrapped.as_bytes(), no_fetch).is_ok());
     }
 
     #[test]

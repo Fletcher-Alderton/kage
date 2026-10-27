@@ -299,8 +299,9 @@ tool results (Claude) sees it. `/image save` writes it into the
 project. A call may also name a `path` in the workspace to save it
 there at once; an existing file is never replaced, and a path outside
 the workspace is refused before the server is asked. A server that
-answers with a link instead of the image is refused, because kage does
-not fetch it.
+answers with a link instead of the image is followed only when the link
+is on the endpoint's own host: kage fetches it without the key and
+without following a redirect. A link to any other host is refused.
 
 The tool counts as a write: plan mode and a read-only session refuse
 it, as they refuse `write`, and permission rules name it

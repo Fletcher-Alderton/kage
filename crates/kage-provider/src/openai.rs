@@ -10,6 +10,7 @@ use std::io::{BufReader, Read};
 use kage_core::{CancelFlag, Content, Message, Reasoning, ReasoningField, Role, ToolCallId};
 use serde_json::Value;
 
+use crate::media::origin;
 use crate::{
     EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
     StopReason, StreamRequest, ToolSpec,
@@ -921,16 +922,6 @@ fn merge_detail(details: &mut Vec<Value>, entry: &Value) {
     }
 }
 
-/// The scheme and host of `url`, without a path: the origin a linked
-/// picture must come from.
-fn origin(url: &str) -> String {
-    let after_scheme = url.find("://").map_or(0, |at| at + 3);
-    let end = url[after_scheme..]
-        .find('/')
-        .map_or(url.len(), |at| after_scheme + at);
-    url[..end].to_owned()
-}
-
 /// The targets of the Markdown images in `text`: `![alt](url)`.
 fn image_links(text: &str) -> Vec<&str> {
     let mut links = Vec::new();
@@ -953,28 +944,15 @@ fn image_links(text: &str) -> Vec<&str> {
 /// The picture at `url` as image output, or `None` when it cannot be
 /// fetched or is not an image. The link stays in the reply either way.
 ///
-/// A redirect is not followed: only `url` itself was checked against
-/// the provider's origin. A body over the answer cap is dropped rather
-/// than cut short.
+/// A redirect is not followed and a body over the answer cap is
+/// dropped, as [`crate::media::fetch_link`] reads one.
 fn fetch_image(cancel: &CancelFlag, url: &str) -> Option<ProviderEvent> {
     use base64::Engine as _;
 
-    let (response, _kill) = crate::http::send_within(
-        cancel,
-        url.to_owned(),
-        std::time::Duration::from_secs(60),
-        |agent, url| agent.get(url).config().max_redirects(0).build().call(),
-    )
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let bytes = crate::media::read_capped(
-        response.into_body().into_reader(),
-        crate::media::MAX_RESPONSE_BYTES,
-        "the image answer",
-    )
-    .ok()?;
+    let timeout = std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + timeout;
+    let bytes =
+        crate::media::fetch_link(url, "the image answer", deadline, timeout, cancel).ok()?;
     let mime = kage_core::image::sniff_mime(&bytes)?;
     Some(ProviderEvent::Media {
         kind: kage_core::Modality::Image,
