@@ -4,9 +4,9 @@
 //! The tool is registered only when that table resolves to an endpoint
 //! and a model, so a config without one advertises the same tools as
 //! before. Its clip is the result's audio media (see [`ToolMedia`])
-//! and stays in the session. It is still saved in the workspace, under
-//! `generated/` when the call names no `path`, because not every
-//! client plays audio.
+//! and stays in the session, where `/media` and the desktop play and
+//! save it. A call may also name a `path` in the workspace to save it
+//! there at once.
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -82,9 +82,9 @@ impl Tool for GenerateSpeechTool {
 
     fn description(&self) -> &'static str {
         "Read a text aloud through the configured speech server. The clip comes back with \
-         this result and plays where the client plays audio; it stays in the session and \
-         is also saved in the workspace, under generated/ unless `path` names a \
-         place. Name a `path` when the user wants the file somewhere."
+         this result and plays where the client plays audio; it stays in the session, and \
+         the user can play or save it from there. Name a `path` only when the user wants \
+         the file in the workspace."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -109,17 +109,16 @@ impl Tool for GenerateSpeechTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Save the clip here, relative to the workspace, such \
-                                    as audio/intro.mp3. The extension follows the clip's \
-                                    type, and an existing file is never replaced. Without \
-                                    it the clip is saved under generated/.",
+                    "description": "Also save the clip here, relative to the workspace, \
+                                    such as audio/intro.mp3. The extension follows the \
+                                    clip's type, and an existing file is never replaced.",
                 },
             },
             "required": ["text"],
         })
     }
 
-    /// A call always saves a file in the workspace, so plan mode and a
+    /// A call may save a file in the workspace, so plan mode and a
     /// read-only session refuse it as they refuse `write`.
     fn risk(&self) -> Risk {
         Risk::Write
@@ -149,17 +148,15 @@ impl Tool for GenerateSpeechTool {
             .as_deref()
             .map(str::trim)
             .filter(|language| !language.is_empty());
-        // Checked before the call: a path outside the workspace, or a
-        // `generated` directory linked out of it, costs no request.
-        let given_path = input
+        // Checked before the call, so a path outside the workspace
+        // costs no request.
+        let path = input
             .path
             .as_deref()
             .map(str::trim)
             .filter(|path| !path.is_empty());
-        if let Some(path) = given_path {
+        if let Some(path) = path {
             workspace_path(cx.workdir(), path)?;
-        } else {
-            workspace_path(cx.workdir(), "generated")?;
         }
         if cx.is_cancelled() {
             return Err(ToolError::Cancelled);
@@ -192,31 +189,33 @@ impl Tool for GenerateSpeechTool {
         };
         // A failed save keeps the clip in this result: it was made and
         // paid for, and the session holds it even when no file does.
-        let target =
-            given_path.map_or_else(|| super::images::generated_name(clip.mime), str::to_owned);
-        let saved = media_tool::save_in_workspace(cx.workdir(), &target, clip.mime, &clip.bytes);
+        let saved = path
+            .map(|path| media_tool::save_in_workspace(cx.workdir(), path, clip.mime, &clip.bytes));
         let mut text = format!(
             "Read {count} characters aloud ({}, {}). The clip plays where the client plays \
              audio, and it is kept in the session.",
             clip.mime,
             kage_core::image::human_bytes(clip.bytes.len()),
         );
-        match &saved {
-            Ok(saved) => {
-                let shown = media_tool::shown_path(cx.workdir(), saved);
+        let saved = match saved {
+            Some(Ok(saved)) => {
+                let shown = media_tool::shown_path(cx.workdir(), &saved);
                 let _ = write!(text, " Saved as {}.", shown.display());
+                Some(saved)
             }
-            Err(why) => {
+            Some(Err(why)) => {
                 let _ = write!(text, " It was not saved: {why}.");
+                None
             }
-        }
+            None => None,
+        };
         Ok(ToolOutput {
             is_error: false,
             text,
             structured: Some(serde_json::json!({
                 "model": self.model,
                 "voice": request.voice,
-                "path": saved.as_ref().ok().map(|path| path.display().to_string()),
+                "path": saved.as_ref().map(|path| path.display().to_string()),
             })),
             terminate: false,
             media: vec![ToolMedia {
@@ -268,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn the_clip_rides_the_result_and_is_saved_under_generated() {
+    fn the_clip_rides_the_result_and_no_file_is_written() {
         let (url, seen) = speech_server();
         let workdir = tempfile::tempdir().unwrap();
         let cancel = CancelFlag::new();
@@ -297,19 +296,12 @@ mod tests {
             "{}",
             output.text
         );
-        let structured = output.structured.unwrap();
-        let saved = std::path::PathBuf::from(structured["path"].as_str().unwrap());
-        let root = workdir.path().canonicalize().unwrap();
-        let shown = saved.strip_prefix(&root).unwrap();
-        assert!(shown.starts_with("generated"), "{saved:?}");
-        assert_eq!(saved.extension().unwrap(), "mp3");
-        assert_eq!(std::fs::read(&saved).unwrap(), MP3);
-        assert!(
-            output
-                .text
-                .contains(&format!("Saved as {}.", shown.display())),
-            "{}",
-            output.text
+        assert!(!output.text.contains("Saved"), "{}", output.text);
+        assert!(output.structured.unwrap()["path"].is_null());
+        assert_eq!(
+            std::fs::read_dir(workdir.path()).unwrap().count(),
+            0,
+            "nothing is written without a path"
         );
         assert_eq!(seen.count(), 1);
         assert_eq!(seen.json_body(0)["input"], "a red kite");
@@ -409,11 +401,14 @@ mod tests {
     fn a_clip_that_cannot_be_saved_still_rides_the_result() {
         let (url, seen) = speech_server();
         let workdir = tempfile::tempdir().unwrap();
-        std::fs::write(workdir.path().join("generated"), b"a file, not a directory").unwrap();
+        std::fs::write(workdir.path().join("audio"), b"a file, not a directory").unwrap();
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir.path(), &cancel);
         let output = tool(&url)
-            .execute(serde_json::json!({ "text": "hello" }), &cx)
+            .execute(
+                serde_json::json!({ "text": "hello", "path": "audio/hello.mp3" }),
+                &cx,
+            )
             .unwrap();
         assert!(!output.is_error);
         assert_eq!(output.media.len(), 1);
@@ -429,15 +424,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_generated_symlink_out_of_the_workspace_costs_no_request() {
+    fn a_path_through_a_symlink_out_of_the_workspace_costs_no_request() {
         let (url, seen) = speech_server();
         let outside = tempfile::tempdir().unwrap();
         let workdir = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), workdir.path().join("generated")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), workdir.path().join("audio")).unwrap();
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir.path(), &cancel);
         let err = tool(&url)
-            .execute(serde_json::json!({ "text": "hello" }), &cx)
+            .execute(
+                serde_json::json!({ "text": "hello", "path": "audio/hello.mp3" }),
+                &cx,
+            )
             .unwrap_err();
         assert!(matches!(err, ToolError::Path { .. }), "{err:?}");
         assert_eq!(seen.count(), 0);
