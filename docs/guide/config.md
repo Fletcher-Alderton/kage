@@ -316,8 +316,10 @@ default = "ask"
 ## image editing
 
 The `edit_image` tool changes an image you already have from a
-prompt. It takes one PNG, JPEG or WebP file from the workspace plus
-the prompt and sends both to an OpenAI-compatible Images API
+prompt. It takes one PNG, JPEG or WebP image plus the prompt: a file
+from the workspace, or, when the call names none, the newest image in
+an earlier message, such as one `generate_image` made in a previous
+step or one you attached. It sends both to an OpenAI-compatible Images API
 (`POST {base_url}/images/edits`) as a multipart form. The edited
 image comes back with the call, exactly as a generated one does. kage
 offers it only when `[tools.edit_image]` names an endpoint and a
@@ -347,9 +349,9 @@ and because it has its own permission rule. To keep the key out of
 the environment, save it for the tool with
 `kage auth login edit_image` and leave out `api_key_env`.
 
-The source image is read only from inside the workspace, even with
-`confine_paths = false`, because the file is uploaded, and it may be
-at most 16 MiB. One image goes in per call. There is no mask. A
+A source file is read only from inside the workspace, even with
+`confine_paths = false`, because the file is uploaded. Either source
+may be at most 16 MiB. One image goes in per call. There is no mask. A
 `path` saves the result and never replaces an existing file, the
 source included: the name gets `-2`, `-3` and so on.
 

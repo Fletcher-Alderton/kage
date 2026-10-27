@@ -9,7 +9,9 @@
 //! name a `path` in the workspace to save it there at once.
 //!
 //! The source image is read from the workspace and uploaded, so it is
-//! confined to the workspace even when path confinement is off.
+//! confined to the workspace even when path confinement is off. A call
+//! that names no source edits the newest image in the conversation, such
+//! as one `generate_image` made or the user attached.
 
 use std::fmt::Write as _;
 use std::io::Read as _;
@@ -19,7 +21,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use kage_core::config::Config;
-use kage_core::{Risk, ToolMedia, ToolOutput, ToolUpdate};
+use kage_core::{Content, MediaSource, Risk, ToolMedia, ToolOutput, ToolUpdate};
 use kage_provider::ProviderError;
 use kage_provider::images::{self, GeneratedImage, ImageEdit};
 use kage_provider::media::{MediaEndpoint, MediaError};
@@ -38,7 +40,8 @@ const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 /// Input shape for the `edit_image` tool.
 #[derive(Debug, Deserialize)]
 struct EditImageInput {
-    image: String,
+    #[serde(default)]
+    image: Option<String>,
     prompt: String,
     #[serde(default)]
     size: Option<String>,
@@ -85,15 +88,6 @@ impl EditImageTool {
     /// because the file is uploaded.
     fn read_source(cx: &ToolContext<'_>, name: &str) -> Result<(Vec<u8>, &'static str), ToolError> {
         let source = workspace_path(cx.workdir(), name)?;
-        let too_long = |bytes: u64| {
-            ToolError::InvalidInput(format!(
-                "{name} is {}; the largest source edit_image reads is {}",
-                kage_core::image::human_bytes(usize::try_from(bytes).unwrap_or(usize::MAX)),
-                kage_core::image::human_bytes(
-                    usize::try_from(MAX_SOURCE_BYTES).unwrap_or(usize::MAX)
-                ),
-            ))
-        };
         let cannot_read = |err: std::io::Error| match err.kind() {
             std::io::ErrorKind::NotFound => {
                 ToolError::InvalidInput(format!("{name} does not exist"))
@@ -111,7 +105,7 @@ impl EditImageTool {
             )));
         }
         if meta.len() > MAX_SOURCE_BYTES {
-            return Err(too_long(meta.len()));
+            return Err(too_long(name, meta.len()));
         }
         let length = usize::try_from(meta.len()).unwrap_or(0);
         // The metadata check bounds the common case; the take bounds a
@@ -121,24 +115,68 @@ impl EditImageTool {
             .take(MAX_SOURCE_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(cannot_read)?;
-        let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if read > MAX_SOURCE_BYTES {
-            return Err(too_long(read));
-        }
-        let mime = match kage_core::image::sniff_mime(&bytes) {
-            Some("image/gif") => {
+        let mime = Self::check_source(name, &bytes)?;
+        Ok((bytes, mime))
+    }
+
+    /// The newest image in the conversation, from any earlier message:
+    /// one the user attached, the model drew, or a tool returned. One
+    /// whose bytes the session no longer holds, or a link, is refused
+    /// rather than passed over for an older image.
+    fn newest_in_history(cx: &ToolContext<'_>) -> Result<(Vec<u8>, &'static str), ToolError> {
+        let name = "the newest image in the conversation";
+        let source = cx
+            .history()
+            .iter()
+            .rev()
+            .flat_map(|message| message.content.iter().rev())
+            .find_map(|block| match block {
+                Content::Image { source, .. } => Some(source),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                ToolError::InvalidInput(
+                    "the conversation holds no image; name a workspace file as `image`".to_owned(),
+                )
+            })?;
+        let data = match source {
+            MediaSource::Base64 { data } => data,
+            MediaSource::Blob { .. } => {
                 return Err(ToolError::InvalidInput(format!(
-                    "{name} is a GIF; edit_image takes PNG, JPEG or WebP"
+                    "{name} is no longer stored in the session; name a workspace file as `image`"
                 )));
             }
-            Some(mime @ ("image/png" | "image/jpeg" | "image/webp")) => mime,
-            _ => {
+            MediaSource::Url { .. } => {
                 return Err(ToolError::InvalidInput(format!(
-                    "{name} is not a PNG, JPEG or WebP image"
+                    "{name} is a link, which edit_image does not fetch; save it in the \
+                     workspace and name the file as `image`"
                 )));
             }
         };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| ToolError::Other(format!("{name} is not valid base64")))?;
+        let mime = Self::check_source(name, &bytes)?;
         Ok((bytes, mime))
+    }
+
+    /// The type of a source image `name` holding `bytes`, refusing
+    /// anything but a PNG, JPEG or WebP image of at most
+    /// [`MAX_SOURCE_BYTES`].
+    fn check_source(name: &str, bytes: &[u8]) -> Result<&'static str, ToolError> {
+        let read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if read > MAX_SOURCE_BYTES {
+            return Err(too_long(name, read));
+        }
+        match kage_core::image::sniff_mime(bytes) {
+            Some("image/gif") => Err(ToolError::InvalidInput(format!(
+                "{name} is a GIF; edit_image takes PNG, JPEG or WebP"
+            ))),
+            Some(mime @ ("image/png" | "image/jpeg" | "image/webp")) => Ok(mime),
+            _ => Err(ToolError::InvalidInput(format!(
+                "{name} is not a PNG, JPEG or WebP image"
+            ))),
+        }
     }
 
     /// Saves the edited image when `path` is given, and builds the
@@ -191,16 +229,27 @@ fn open_source(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     options.open(path)
 }
 
+/// The refusal for a source image `name` of `bytes`, over
+/// [`MAX_SOURCE_BYTES`].
+fn too_long(name: &str, bytes: u64) -> ToolError {
+    ToolError::InvalidInput(format!(
+        "{name} is {}; the largest source edit_image reads is {}",
+        kage_core::image::human_bytes(usize::try_from(bytes).unwrap_or(usize::MAX)),
+        kage_core::image::human_bytes(usize::try_from(MAX_SOURCE_BYTES).unwrap_or(usize::MAX)),
+    ))
+}
+
 impl Tool for EditImageTool {
     fn name(&self) -> &'static str {
         EDIT_IMAGE_TOOL
     }
 
     fn description(&self) -> &'static str {
-        "Edit a PNG, JPEG or WebP file in the workspace from a text prompt. The edited image \
-         comes back with this result: the user sees it, and `path` also saves it. An image \
-         `generate_image` made must first be saved with its `path`, because this tool reads \
-         files. Use `read` to look at the source image first."
+        "Edit a PNG, JPEG or WebP image from a text prompt: a file in the workspace, or, \
+         when `image` is left out, the newest image in an earlier message, such as one \
+         `generate_image` made in a previous step or the user attached. A call beside it in \
+         the same step cannot be its source. The edited image comes back with this result: \
+         the user sees it, and `path` also saves it."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -210,8 +259,9 @@ impl Tool for EditImageTool {
                 "image": {
                     "type": "string",
                     "description": "The image to edit: a PNG, JPEG or WebP file in the \
-                                    workspace, such as assets/icon.png. It is uploaded to \
-                                    the image server and is not changed.",
+                                    workspace, such as assets/icon.png. Leave it out to \
+                                    edit the newest image in an earlier message. It is \
+                                    uploaded to the image server and is not changed.",
                 },
                 "prompt": {
                     "type": "string",
@@ -230,7 +280,7 @@ impl Tool for EditImageTool {
                                     source included: the name gets -2, -3 and so on.",
                 },
             },
-            "required": ["image", "prompt"],
+            "required": ["prompt"],
         })
     }
 
@@ -271,11 +321,16 @@ impl Tool for EditImageTool {
         if let Some(path) = path {
             workspace_path(cx.workdir(), path)?;
         }
-        let source = input.image.trim();
-        if source.is_empty() {
-            return Err(ToolError::InvalidInput("image is empty".to_owned()));
-        }
-        let (bytes, mime) = Self::read_source(cx, source)?;
+        let named = input
+            .image
+            .as_deref()
+            .map(str::trim)
+            .filter(|image| !image.is_empty());
+        let (bytes, mime) = match named {
+            Some(name) => Self::read_source(cx, name)?,
+            None => Self::newest_in_history(cx)?,
+        };
+        let source = named.unwrap_or("the newest image in the conversation");
         if cx.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
@@ -317,7 +372,7 @@ impl Tool for EditImageTool {
             text,
             structured: Some(serde_json::json!({
                 "model": self.model,
-                "source": source,
+                "source": named,
                 "note": image.revised_prompt,
                 "path": saved.as_ref().map(|path| path.display().to_string()),
             })),
@@ -421,6 +476,136 @@ mod tests {
         assert_eq!(output.structured.unwrap()["source"], "src/icon.png");
         assert_eq!(seen.count(), 1);
         assert!(seen.contains(PNG), "the source bytes reach the server");
+    }
+
+    /// A message from `role` holding one image of `bytes`.
+    fn image_message(role: kage_core::Role, bytes: &[u8]) -> std::sync::Arc<kage_core::Message> {
+        std::sync::Arc::new(kage_core::Message::new(
+            role,
+            vec![Content::Image {
+                source: MediaSource::Base64 {
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                },
+                mime: "image/png".to_owned(),
+            }],
+            None,
+        ))
+    }
+
+    #[test]
+    fn without_a_source_the_newest_image_in_the_conversation_is_edited() {
+        let (url, seen) = edit_server();
+        let workdir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let history = [
+            image_message(kage_core::Role::User, JPEG),
+            image_message(kage_core::Role::ToolResult, WEBP),
+            std::sync::Arc::new(kage_core::Message::new(
+                kage_core::Role::Assistant,
+                vec![Content::Text {
+                    text: "here it is".to_owned(),
+                }],
+                None,
+            )),
+        ];
+        let cx = ToolContext::new(workdir.path(), &cancel).with_history(&history);
+        let output = tool(&url)
+            .execute(serde_json::json!({ "prompt": "make it blue" }), &cx)
+            .unwrap();
+        assert!(!output.is_error, "{}", output.text);
+        assert!(
+            output
+                .text
+                .starts_with("Edited the newest image in the conversation"),
+            "{}",
+            output.text
+        );
+        assert!(output.structured.unwrap()["source"].is_null());
+        assert_eq!(seen.count(), 1);
+        assert!(seen.contains(WEBP), "the newest image is uploaded");
+        assert!(!seen.contains(JPEG), "an older image is not");
+    }
+
+    #[test]
+    fn without_a_source_or_an_image_in_the_conversation_nothing_is_asked() {
+        let (url, seen) = edit_server();
+        let workdir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let cx = ToolContext::new(workdir.path(), &cancel);
+        let err = tool(&url)
+            .execute(
+                serde_json::json!({ "image": " ", "prompt": "make it blue" }),
+                &cx,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, ToolError::InvalidInput(m) if m.contains("holds no image")),
+            "{err:?}"
+        );
+        assert_eq!(seen.count(), 0);
+    }
+
+    #[test]
+    fn a_newest_image_the_session_no_longer_holds_is_refused_not_skipped() {
+        let workdir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let gone = |source| {
+            std::sync::Arc::new(kage_core::Message::new(
+                kage_core::Role::User,
+                vec![Content::Image {
+                    source,
+                    mime: "image/png".to_owned(),
+                }],
+                None,
+            ))
+        };
+        for (source, says) in [
+            (
+                MediaSource::Blob {
+                    sha256: "ab".repeat(32),
+                    size: 24,
+                },
+                "no longer stored",
+            ),
+            (
+                MediaSource::Url {
+                    url: "https://example.com/a.png".to_owned(),
+                },
+                "is a link",
+            ),
+        ] {
+            let (url, seen) = edit_server();
+            let history = [image_message(kage_core::Role::User, PNG), gone(source)];
+            let cx = ToolContext::new(workdir.path(), &cancel).with_history(&history);
+            let err = tool(&url)
+                .execute(serde_json::json!({ "prompt": "make it blue" }), &cx)
+                .unwrap_err();
+            assert!(
+                matches!(&err, ToolError::InvalidInput(m) if m.contains(says)),
+                "{err:?}"
+            );
+            assert_eq!(seen.count(), 0, "the older image is not edited instead");
+        }
+    }
+
+    #[test]
+    fn a_gif_in_the_conversation_is_refused_by_name() {
+        let (url, seen) = edit_server();
+        let workdir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let history = [image_message(
+            kage_core::Role::User,
+            b"GIF89a\x01\x00\x01\x00",
+        )];
+        let cx = ToolContext::new(workdir.path(), &cancel).with_history(&history);
+        let err = tool(&url)
+            .execute(serde_json::json!({ "prompt": "make it blue" }), &cx)
+            .unwrap_err();
+        assert!(
+            matches!(&err, ToolError::InvalidInput(m) if m.starts_with("the newest image in the conversation is a GIF")),
+            "{err:?}"
+        );
+        assert_eq!(seen.count(), 0);
     }
 
     #[test]
