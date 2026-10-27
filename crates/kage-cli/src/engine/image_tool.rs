@@ -361,7 +361,7 @@ mod tests {
         let workdir = tempfile::tempdir().unwrap();
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir.path(), &cancel);
-        for path in ["../out.png", "/tmp/out.png", "art/x.png:stream"] {
+        for path in ["../out.png", "/tmp/out.png", "art/x.png:stream", ".", "./"] {
             let err = tool(&url)
                 .execute(serde_json::json!({ "prompt": "x", "path": path }), &cx)
                 .unwrap_err();

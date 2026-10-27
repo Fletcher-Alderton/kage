@@ -466,6 +466,8 @@ mod tests {
         for input in [
             serde_json::json!({ "text": "  " }),
             serde_json::json!({ "text": "hello", "path": "../out.mp3" }),
+            serde_json::json!({ "text": "hello", "path": "." }),
+            serde_json::json!({ "text": "hello", "path": "./" }),
         ] {
             let err = tool(&url).execute(input, &cx).unwrap_err();
             assert!(
@@ -474,6 +476,8 @@ mod tests {
             );
         }
         assert_eq!(seen.count(), 0, "no request is made for a refused call");
+        let beside = workdir.path().with_extension("mp3");
+        assert!(!beside.exists(), "{} was written", beside.display());
     }
 
     #[cfg(unix)]

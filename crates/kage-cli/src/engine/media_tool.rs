@@ -204,7 +204,9 @@ fn provider_endpoint(
 
 /// `path` as an absolute path inside `workdir`, refusing one that leaves
 /// it: through `..`, a root, a drive, a `:` (a Windows stream or drive),
-/// or a symlink.
+/// or a symlink. The workspace itself is refused too (`.`, `./`, or a
+/// link to it): an extension added to it would name a file beside the
+/// workspace, outside it.
 pub(super) fn workspace_path(workdir: &Path, path: &str) -> Result<PathBuf, ToolError> {
     let refuse = |reason: &str| ToolError::Path {
         path: PathBuf::from(path),
@@ -219,7 +221,11 @@ pub(super) fn workspace_path(workdir: &Path, path: &str) -> Result<PathBuf, Tool
     {
         return Err(refuse("must not leave the workspace"));
     }
-    kage_tools::resolve_under(workdir, Path::new(path))
+    let resolved = kage_tools::resolve_under(workdir, Path::new(path))?;
+    if workdir.canonicalize().is_ok_and(|root| root == resolved) {
+        return Err(refuse("must name a file inside the workspace"));
+    }
+    Ok(resolved)
 }
 
 /// `path` with an extension naming `mime`'s type. One that already
@@ -351,6 +357,29 @@ mod tests {
         assert_eq!(ext("x", "audio/mpeg"), PathBuf::from("x.mp3"));
         assert_eq!(ext("clip.png", "audio/mpeg"), PathBuf::from("clip.mp3"));
         assert_eq!(ext("a.wav", "audio/wav"), PathBuf::from("a.wav"));
+    }
+
+    #[test]
+    fn the_workspace_itself_is_not_a_path_inside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in [".", "./", "./."] {
+            let err = workspace_path(dir.path(), path).unwrap_err();
+            assert!(
+                matches!(&err, ToolError::Path { reason, .. } if reason.contains("inside the workspace")),
+                "{path}: {err:?}"
+            );
+        }
+        assert!(workspace_path(dir.path(), "a/b.mp3").is_ok());
+        assert!(workspace_path(dir.path(), "./a.mp3").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_the_workspace_is_not_a_path_inside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("here")).unwrap();
+        assert!(workspace_path(dir.path(), "here").is_err());
+        assert!(workspace_path(dir.path(), "here/clip.mp3").is_ok());
     }
 
     #[test]
