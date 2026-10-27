@@ -507,8 +507,8 @@ pub(crate) enum AuthAction {
     /// Save an API key for a provider, prompting for it without echo.
     Login {
         /// Provider id, or a media tool name (`generate_image`,
-        /// `edit_image`) for the key that tool sends to its
-        /// `base_url`. Omit to pick from a list.
+        /// `edit_image`, `generate_speech`) for the key that tool
+        /// sends to its `base_url`. Omit to pick from a list.
         provider: Option<String>,
     },
     /// Remove a saved API key.

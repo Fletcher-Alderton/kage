@@ -1022,6 +1022,10 @@ mod tests {
             "edit_image",
             &config.providers.custom
         ));
+        assert!(login_target_is_known(
+            "generate_speech",
+            &config.providers.custom
+        ));
 
         let mut config = kage_core::config::Config::default();
         config.providers.custom.insert(

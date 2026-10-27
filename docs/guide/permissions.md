@@ -252,10 +252,10 @@ prompt, except the tools you approved for the session or always.
 ## plan mode
 
 [Plan mode](/guide/plan-mode) layers its own rules on top: `write`,
-`edit`, `generate_image` and `edit_image` are refused, and commands
-(`shell`, agents, MCP tools, and tools of unknown risk) always ask,
-even in `allow` mode and even when approved for the session.
-Configured denies and `/permission deny` still deny.
+`edit`, `generate_image`, `edit_image` and `generate_speech` are
+refused, and commands (`shell`, agents, MCP tools, and tools of
+unknown risk) always ask, even in `allow` mode and even when approved
+for the session. Configured denies and `/permission deny` still deny.
 
 ## yolo (`--yolo`)
 

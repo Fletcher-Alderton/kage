@@ -25,6 +25,7 @@ mod recorder;
 mod runner;
 mod sessions;
 mod shell;
+mod speech_tool;
 mod swarm_tool;
 mod worktree;
 
@@ -79,6 +80,7 @@ use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 pub(crate) const MEDIA_TOOLS: &[&str] = &[
     image_tool::GENERATE_IMAGE_TOOL,
     edit_image_tool::EDIT_IMAGE_TOOL,
+    speech_tool::GENERATE_SPEECH_TOOL,
 ];
 
 /// A session to host, with the resources its runs use.

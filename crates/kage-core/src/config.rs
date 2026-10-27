@@ -82,6 +82,11 @@ pub struct ToolsConfig {
     /// registered.
     #[serde(default, skip_serializing_if = "MediaToolConfig::is_default")]
     pub edit_image: MediaToolConfig,
+    /// The speech endpoint the `generate_speech` tool calls
+    /// (`[tools.generate_speech]`). Without one the tool is not
+    /// registered.
+    #[serde(default, skip_serializing_if = "SpeechToolConfig::is_default")]
+    pub generate_speech: SpeechToolConfig,
 }
 
 impl ToolsConfig {
@@ -92,6 +97,7 @@ impl ToolsConfig {
             && self.web_search.is_default()
             && self.generate_image.is_default()
             && self.edit_image.is_default()
+            && self.generate_speech.is_default()
     }
 }
 
@@ -133,6 +139,31 @@ pub struct MediaToolConfig {
 }
 
 impl MediaToolConfig {
+    /// Whether the defaults are in effect, which leaves the tool
+    /// unregistered.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The speech endpoint the `generate_speech` tool calls
+/// (`[tools.generate_speech]`): the endpoint keys of
+/// [`MediaToolConfig`] plus a default voice. Without an endpoint the
+/// tool is not registered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpeechToolConfig {
+    /// The endpoint the tool calls, shared with the other media tools.
+    #[serde(flatten)]
+    pub endpoint: MediaToolConfig,
+    /// The voice asked when a call names none, left out of the
+    /// request when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+}
+
+impl SpeechToolConfig {
     /// Whether the defaults are in effect, which leaves the tool
     /// unregistered.
     #[must_use]
@@ -316,7 +347,8 @@ impl Config {
     /// `plugins.capabilities` tables are dropped unless the project is
     /// trusted (see [`crate::trust`]). The project file's `providers`,
     /// `acp`, `plugins.registry` and the media tables
-    /// `tools.generate_image` and `tools.edit_image` never apply:
+    /// `tools.generate_image`, `tools.edit_image` and
+    /// `tools.generate_speech` never apply:
     /// those are only read from the user config.
     /// `plugins.disabled` is the union of the user's list and the
     /// winning layer's, so a project can disable a plugin but never
@@ -2395,5 +2427,55 @@ default = "ask"   # keep asking
         let mut only_model = Config::default();
         only_model.tools.edit_image.model = Some("image-large".into());
         assert!(!only_model.tools.is_default());
+    }
+
+    #[test]
+    fn tools_generate_speech_roundtrips_and_hides_by_default() {
+        let _globals = process_globals();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.tools.generate_speech = SpeechToolConfig {
+            endpoint: MediaToolConfig {
+                base_url: Some("https://speech.example/v1".into()),
+                api_key_env: Some("GENERATE_SPEECH_API_KEY".into()),
+                headers: BTreeMap::from([("X-Team".to_owned(), "infra".to_owned())]),
+                model: Some("speech-small".into()),
+                timeout_secs: Some(90),
+                ..MediaToolConfig::default()
+            },
+            voice: Some("alloy".into()),
+        };
+        assert!(!cfg.tools.is_default());
+        std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded, cfg);
+
+        let default_body = toml::to_string(&Config::default()).unwrap();
+        assert!(!default_body.contains("generate_speech"), "{default_body}");
+
+        let mut only_voice = Config::default();
+        only_voice.tools.generate_speech.voice = Some("alloy".into());
+        assert!(!only_voice.tools.is_default());
+    }
+
+    #[test]
+    fn tools_generate_speech_flat_keys_parse_beside_voice() {
+        let cfg: Config = toml::from_str(
+            "[tools.generate_speech]\n\
+             base_url = \"https://speech.example/v1\"\n\
+             model = \"speech-small\"\n\
+             timeout_secs = 90\n\
+             voice = \"alloy\"\n",
+        )
+        .unwrap();
+        let speech = &cfg.tools.generate_speech;
+        assert_eq!(
+            speech.endpoint.base_url.as_deref(),
+            Some("https://speech.example/v1")
+        );
+        assert_eq!(speech.endpoint.model.as_deref(), Some("speech-small"));
+        assert_eq!(speech.endpoint.timeout_secs, Some(90));
+        assert_eq!(speech.voice.as_deref(), Some("alloy"));
     }
 }

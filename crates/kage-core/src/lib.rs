@@ -4,6 +4,7 @@
 
 pub mod agent_report;
 pub mod agents;
+pub mod audio;
 pub mod build;
 pub mod cancel;
 pub mod catalog_url;

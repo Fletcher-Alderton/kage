@@ -1907,3 +1907,38 @@ fn a_tool_s_images_follow_its_result_in_history() {
     );
     assert_eq!(message.content.len(), 2);
 }
+
+#[test]
+fn a_tool_s_audio_is_named_in_the_text_and_its_image_is_kept() {
+    let output = ToolOutput {
+        text: "made media".into(),
+        media: vec![
+            kage_core::ToolMedia {
+                mime: "image/png".into(),
+                data: "iVBO".into(),
+            },
+            kage_core::ToolMedia {
+                mime: "audio/mpeg".into(),
+                data: "SUQz".into(),
+            },
+        ],
+        ..ToolOutput::default()
+    };
+    let message = result_message(ToolCallId::new("c1"), output, MessageId::new());
+    assert_eq!(message.role, Role::ToolResult);
+    assert!(matches!(
+        &message.content[0],
+        Content::ToolResultBlock { output, .. }
+            if output == "made media\n[audio/mpeg output is not kept]"
+    ));
+    assert_eq!(
+        message.content[1],
+        Content::Image {
+            source: MediaSource::Base64 {
+                data: "iVBO".into()
+            },
+            mime: "image/png".into(),
+        }
+    );
+    assert_eq!(message.content.len(), 2);
+}

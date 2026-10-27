@@ -100,12 +100,7 @@ pub(super) fn save(
     bytes: &[u8],
 ) -> Result<PathBuf, String> {
     let target = dest.map_or_else(
-        || {
-            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            workdir
-                .join("generated")
-                .join(format!("{stamp}.{}", extension(mime)))
-        },
+        || workdir.join(generated_name(mime)),
         |dest| workdir.join(dest),
     );
     if let Some(dir) = target.parent() {
@@ -165,8 +160,18 @@ fn open(mime: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// The file extension for an image MIME type.
+/// The workspace-relative name of a fresh file under `generated/`,
+/// stamped with the current time, named for `mime`'s type.
+pub(super) fn generated_name(mime: &str) -> String {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    format!("generated/{stamp}.{}", extension(mime))
+}
+
+/// The file extension for an image or audio MIME type.
 fn extension(mime: &str) -> &str {
+    if let Some(ext) = kage_core::audio::extension_for(mime) {
+        return ext;
+    }
     match mime {
         "image/jpeg" | "image/jpg" => "jpg",
         "image/svg+xml" => "svg",
@@ -185,7 +190,7 @@ mod tests {
     use kage_core::{Content, MediaSource, Message, Role};
     use kage_session::{EntryId, FORMAT_VERSION, Header, MessageEntry, SessionEntry, SessionId};
 
-    use super::{extension, produced_image, save};
+    use super::{extension, generated_name, produced_image, save};
 
     fn image(role: Role, bytes: &[u8]) -> SessionEntry {
         let block = Content::Image {
@@ -269,5 +274,19 @@ mod tests {
         assert_eq!(extension("image/jpeg"), "jpg");
         assert_eq!(extension("image/svg+xml"), "svg");
         assert_eq!(extension("image/../x"), "png");
+        assert_eq!(extension("audio/mpeg"), "mp3");
+        assert_eq!(extension("audio/wav"), "wav");
+    }
+
+    #[test]
+    fn generated_name_lands_under_generated_named_for_the_type() {
+        let name = generated_name("audio/mpeg");
+        assert!(name.starts_with("generated/"), "{name}");
+        assert_eq!(
+            std::path::Path::new(&name)
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("mp3")
+        );
     }
 }

@@ -25,6 +25,7 @@ pub mod openai;
 pub mod openai_responses;
 pub mod registry;
 pub mod request;
+pub mod speech;
 pub mod sse;
 
 #[cfg(any(test, feature = "testing"))]

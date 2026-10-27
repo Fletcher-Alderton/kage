@@ -767,11 +767,4 @@ mod tests {
         assert!(tools.get(EDIT_IMAGE_TOOL).is_some());
         assert!(tools.get(GENERATE_IMAGE_TOOL).is_none());
     }
-
-    #[test]
-    fn an_all_default_config_registers_neither_media_tool() {
-        let tools = kage_tools::builtin_registry().with_media_tools(&Config::default());
-        assert!(tools.get(EDIT_IMAGE_TOOL).is_none());
-        assert!(tools.get(GENERATE_IMAGE_TOOL).is_none());
-    }
 }

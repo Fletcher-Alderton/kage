@@ -1645,4 +1645,39 @@ mod tests {
 
         assert!(agent_part("plain words with no agent elements").is_none());
     }
+
+    #[test]
+    fn tool_media_content_sends_audio_and_image_blocks() {
+        let audio = tool_media_content(&kage_core::ToolMedia {
+            mime: "audio/mpeg".into(),
+            data: "SUQz".into(),
+        });
+        let ToolCallContent::Content(chunk) = audio else {
+            panic!("expected content: {audio:?}");
+        };
+        assert_eq!(
+            chunk.content,
+            ContentBlock::Audio(BlobContent {
+                data: "SUQz".into(),
+                mime_type: "audio/mpeg".into(),
+                uri: None,
+            })
+        );
+
+        let image = tool_media_content(&kage_core::ToolMedia {
+            mime: "image/png".into(),
+            data: "iVBO".into(),
+        });
+        let ToolCallContent::Content(chunk) = image else {
+            panic!("expected content: {image:?}");
+        };
+        assert_eq!(
+            chunk.content,
+            ContentBlock::Image(BlobContent {
+                data: "iVBO".into(),
+                mime_type: "image/png".into(),
+                uri: None,
+            })
+        );
+    }
 }

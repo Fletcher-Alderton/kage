@@ -106,6 +106,13 @@ scrub_env = []
 # provider = "openai"
 # model = "gpt-image-2"
 
+[tools.generate_speech]
+# the speech endpoint the generate_speech tool calls. Without one the
+# tool is not offered. See "speech" below.
+# base_url = "https://speech.example.com/v1"
+# model = "speech-small"
+# voice = "alloy"
+
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
 # leader = "<C-x>"
@@ -218,8 +225,9 @@ parts of it only apply once you trust the project:
 All of them share one trust decision. Every other project key, such
 as `[ui]`, `[loop]` or `[agents]`, applies without trust. Provider
 settings, `[acp.agents]`, `[tools.generate_image]`,
-`[tools.edit_image]`, `provider.default_model` and `plugins.dir` are
-only read from your user config.
+`[tools.edit_image]`, `[tools.generate_speech]`,
+`provider.default_model` and `plugins.dir` are only read from your
+user config.
 
 When the TUI starts in a project that sets any of these, it lists what
 the project asks for (server commands and URLs, sampling, capability
@@ -351,6 +359,50 @@ edit, so to approve each one first:
 
 ```toml
 [permissions.tools.edit_image]
+default = "ask"
+```
+
+## speech
+
+The `generate_speech` tool reads a text aloud. It sends the text to an
+endpoint that speaks the OpenAI Speech API
+(`POST {base_url}/audio/speech`), and an audio clip comes back with
+the call. kage sniffs the clip's type from its bytes, so it is MP3 or
+WAV whatever the response headers say. kage offers the tool only when
+`[tools.generate_speech]` names an endpoint and a model.
+
+```toml
+[tools.generate_speech]
+base_url = "https://speech.example.com/v1"
+api_key_env = "SPEECH_API_KEY"   # or a key saved for the tool, below
+model = "speech-small"
+voice = "alloy"
+```
+
+The table takes the same keys as the image tables, plus `voice`, the
+voice asked when a call names none. The example names no provider
+because OpenAI lists every model on this route for shutdown on
+2027-01-06, so a server that still serves the route is needed. To keep
+the key out of the environment, save it for the tool with
+`kage auth login generate_speech` and leave out `api_key_env`.
+
+The clip plays where the client plays audio, and it is not kept in the
+session. Editors over ACP get an `audio` block, the TUI shows a
+`[audio/mpeg from the tool, <size>]` row, and the desktop shows the
+result text. Because the clip is not kept, the tool always saves it,
+under `generated/` unless the call names a `path`, and it never
+replaces an existing file.
+
+The server's limits on text length and voices are its own. When it
+refuses a call, its message reaches the model as written.
+
+The tool counts as a write: plan mode and a read-only session refuse
+it, as they refuse `write`, and permission rules name it
+`generate_speech`. Each call costs a synthesis, so to approve each one
+first:
+
+```toml
+[permissions.tools.generate_speech]
 default = "ask"
 ```
 

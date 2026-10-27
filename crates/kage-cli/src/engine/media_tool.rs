@@ -16,6 +16,7 @@ use kage_tools::{ToolError, ToolRegistry};
 
 use super::edit_image_tool::{EDIT_IMAGE_TOOL, EditImageTool};
 use super::image_tool::{GENERATE_IMAGE_TOOL, GenerateImageTool};
+use super::speech_tool::{GENERATE_SPEECH_TOOL, GenerateSpeechTool};
 use crate::auth::{self, AuthStore};
 
 /// How long one media call may take when the config says nothing.
@@ -41,8 +42,10 @@ pub(crate) trait WithMediaTools {
 
 impl WithMediaTools for ToolRegistry {
     fn with_media_tools(mut self, config: &Config) -> Self {
-        let tables = [&config.tools.generate_image, &config.tools.edit_image];
-        if tables.iter().all(|cfg| cfg.is_default()) {
+        if config.tools.generate_image.is_default()
+            && config.tools.edit_image.is_default()
+            && config.tools.generate_speech.is_default()
+        {
             return self;
         }
         let store = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
@@ -61,6 +64,16 @@ impl WithMediaTools for ToolRegistry {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
                     eprintln!("kage: [tools.edit_image] {reason}; {EDIT_IMAGE_TOOL} is off");
+                }
+            }
+        }
+        if !config.tools.generate_speech.is_default() {
+            match GenerateSpeechTool::from_config(config, &store) {
+                Ok(tool) => self.register(Arc::new(tool)),
+                Err(reason) => {
+                    eprintln!(
+                        "kage: [tools.generate_speech] {reason}; {GENERATE_SPEECH_TOOL} is off"
+                    );
                 }
             }
         }
@@ -311,7 +324,7 @@ pub(super) fn failure(
 
 /// The extension of a recognized media type.
 pub(super) fn extension_for(mime: &str) -> Option<&'static str> {
-    kage_core::image::extension_for(mime)
+    kage_core::image::extension_for(mime).or_else(|| kage_core::audio::extension_for(mime))
 }
 
 /// A saved path relative to the canonical workspace, when it is inside.
@@ -335,11 +348,17 @@ mod tests {
         assert_eq!(ext("x.JPG", "image/jpeg"), PathBuf::from("x.JPG"));
         assert_eq!(ext("x", "image/webp"), PathBuf::from("x.webp"));
         assert_eq!(ext("x.bmp", "image/bmp"), PathBuf::from("x.bmp"));
+        assert_eq!(ext("x", "audio/mpeg"), PathBuf::from("x.mp3"));
+        assert_eq!(ext("clip.png", "audio/mpeg"), PathBuf::from("clip.mp3"));
+        assert_eq!(ext("a.wav", "audio/wav"), PathBuf::from("a.wav"));
     }
 
     #[test]
-    fn an_unset_table_registers_nothing() {
+    fn unset_tables_register_no_media_tool() {
         let tools = kage_tools::builtin_registry().with_media_tools(&Config::default());
-        assert!(tools.get(GENERATE_IMAGE_TOOL).is_none());
+        assert_eq!(tools.len(), kage_tools::builtin_registry().len());
+        for name in crate::engine::MEDIA_TOOLS {
+            assert!(tools.get(name).is_none(), "{name}");
+        }
     }
 }

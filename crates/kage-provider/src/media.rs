@@ -14,6 +14,8 @@ use crate::error::nonempty;
 
 /// The largest answer read. A 1.5 MB PNG is about 2 MB of base64, so
 /// this leaves room for a large image and still refuses a runaway body.
+/// 16-bit mono WAV at 44.1 kHz is about 88 KB a second, so the cap
+/// holds about three minutes of speech.
 pub const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Where a media API is reached. Its `Debug` form leaves the key out.
