@@ -383,23 +383,28 @@ pub(crate) fn unrun_results<F: FnMut(LoopEvent)>(
 }
 
 /// The history message holding `call_id`'s `output`: its result block,
-/// then each image the tool produced, so it is stored, shown and sent
-/// with the result. A kind of media history cannot hold yet is named in
-/// the result text instead.
+/// then each image and audio clip the tool produced, so it is stored,
+/// shown and sent with the result. A kind of media history cannot hold
+/// yet is named in the result text instead.
 fn result_message(call_id: ToolCallId, output: ToolOutput, parent: MessageId) -> Message {
     let mut text = output.text;
-    let mut images = Vec::new();
-    for media in output.media {
-        if Modality::of_mime(&media.mime) == Some(Modality::Image) {
-            images.push(Content::Image {
-                source: MediaSource::Base64 { data: media.data },
-                mime: media.mime,
-            });
-        } else {
-            let _ = std::fmt::Write::write_fmt(
-                &mut text,
-                format_args!("\n[{} output is not kept]", media.mime),
-            );
+    let mut media = Vec::new();
+    for part in output.media {
+        match Modality::of_mime(&part.mime) {
+            Some(Modality::Image) => media.push(Content::Image {
+                source: MediaSource::Base64 { data: part.data },
+                mime: part.mime,
+            }),
+            Some(Modality::Audio) => media.push(Content::Audio {
+                source: MediaSource::Base64 { data: part.data },
+                mime: part.mime,
+            }),
+            _ => {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut text,
+                    format_args!("\n[{} output is not kept]", part.mime),
+                );
+            }
         }
     }
     let mut content = vec![Content::ToolResultBlock {
@@ -407,7 +412,7 @@ fn result_message(call_id: ToolCallId, output: ToolOutput, parent: MessageId) ->
         output: text,
         is_error: output.is_error,
     }];
-    content.extend(images);
+    content.extend(media);
     Message::new(Role::ToolResult, content, Some(parent))
 }
 

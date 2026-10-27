@@ -265,23 +265,28 @@ impl Assembler {
         self.thinking_since.get_or_insert_with(Instant::now);
     }
 
-    /// Append a whole media part. An image becomes an image block; a
-    /// kind kage cannot hold yet becomes a short note in its place, so
-    /// the reply still says something arrived.
+    /// Append a whole media part. An image or an audio clip becomes
+    /// its block; a kind kage cannot hold yet becomes a short note in
+    /// its place, so the reply still says something arrived.
     fn push_media(&mut self, kind: Modality, mime: &str, data: &str) {
         self.end_thinking();
-        if kind == Modality::Image {
-            self.blocks.push(Content::Image {
+        match kind {
+            Modality::Image => self.blocks.push(Content::Image {
                 source: MediaSource::Base64 {
                     data: data.to_owned(),
                 },
                 mime: mime.to_owned(),
-            });
-        } else {
-            self.push_text(&format!(
+            }),
+            Modality::Audio => self.blocks.push(Content::Audio {
+                source: MediaSource::Base64 {
+                    data: data.to_owned(),
+                },
+                mime: mime.to_owned(),
+            }),
+            _ => self.push_text(&format!(
                 "\n[{} output ({mime}) is not kept yet]\n",
                 kind.as_str()
-            ));
+            )),
         }
     }
 
@@ -449,13 +454,18 @@ mod tests {
                 mime: "audio/wav".into(),
                 data: "UklGRg".into(),
             }),
+            Ok(ProviderEvent::Media {
+                kind: Modality::Video,
+                mime: "video/mp4".into(),
+                data: "AAAAIGZ0eXBpc29t".into(),
+            }),
             Ok(ProviderEvent::TextDelta {
                 delta: "done".into(),
             }),
             Ok(end_event()),
         ]);
         let content = &result.message.content;
-        assert_eq!(content.len(), 3, "{content:?}");
+        assert_eq!(content.len(), 4, "{content:?}");
         assert_eq!(
             content[1],
             Content::Image {
@@ -465,9 +475,18 @@ mod tests {
                 mime: "image/png".into(),
             }
         );
+        assert_eq!(
+            content[2],
+            Content::Audio {
+                source: MediaSource::Base64 {
+                    data: "UklGRg".into()
+                },
+                mime: "audio/wav".into(),
+            }
+        );
         assert!(
-            matches!(&content[2], Content::Text { text }
-                if text == "\n[audio output (audio/wav) is not kept yet]\ndone"),
+            matches!(&content[3], Content::Text { text }
+                if text == "\n[video output (video/mp4) is not kept yet]\ndone"),
             "{content:?}"
         );
         assert!(emitted.iter().any(|e| matches!(

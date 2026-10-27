@@ -1893,8 +1893,7 @@ fn a_tool_s_images_follow_its_result_in_history() {
     assert_eq!(message.role, Role::ToolResult);
     assert!(matches!(
         &message.content[0],
-        Content::ToolResultBlock { output, .. }
-            if output == "drawn\n[audio/wav output is not kept]"
+        Content::ToolResultBlock { output, .. } if output == "drawn"
     ));
     assert_eq!(
         message.content[1],
@@ -1905,23 +1904,54 @@ fn a_tool_s_images_follow_its_result_in_history() {
             mime: "image/png".into(),
         }
     );
+    assert_eq!(
+        message.content[2],
+        Content::Audio {
+            source: MediaSource::Base64 {
+                data: "UklG".into()
+            },
+            mime: "audio/wav".into(),
+        }
+    );
+    assert_eq!(message.content.len(), 3);
+}
+
+#[test]
+fn a_tool_s_audio_is_kept_after_its_result() {
+    let output = ToolOutput {
+        text: "made media".into(),
+        media: vec![kage_core::ToolMedia {
+            mime: "audio/mpeg".into(),
+            data: "SUQz".into(),
+        }],
+        ..ToolOutput::default()
+    };
+    let message = result_message(ToolCallId::new("c1"), output, MessageId::new());
+    assert_eq!(message.role, Role::ToolResult);
+    assert!(matches!(
+        &message.content[0],
+        Content::ToolResultBlock { output, .. } if output == "made media"
+    ));
+    assert_eq!(
+        message.content[1],
+        Content::Audio {
+            source: MediaSource::Base64 {
+                data: "SUQz".into()
+            },
+            mime: "audio/mpeg".into(),
+        }
+    );
     assert_eq!(message.content.len(), 2);
 }
 
 #[test]
-fn a_tool_s_audio_is_named_in_the_text_and_its_image_is_kept() {
+fn a_tool_s_video_is_named_in_the_text_and_not_kept() {
     let output = ToolOutput {
-        text: "made media".into(),
-        media: vec![
-            kage_core::ToolMedia {
-                mime: "image/png".into(),
-                data: "iVBO".into(),
-            },
-            kage_core::ToolMedia {
-                mime: "audio/mpeg".into(),
-                data: "SUQz".into(),
-            },
-        ],
+        text: "filmed".into(),
+        media: vec![kage_core::ToolMedia {
+            mime: "video/mp4".into(),
+            data: "AAAA".into(),
+        }],
         ..ToolOutput::default()
     };
     let message = result_message(ToolCallId::new("c1"), output, MessageId::new());
@@ -1929,16 +1959,7 @@ fn a_tool_s_audio_is_named_in_the_text_and_its_image_is_kept() {
     assert!(matches!(
         &message.content[0],
         Content::ToolResultBlock { output, .. }
-            if output == "made media\n[audio/mpeg output is not kept]"
+            if output == "filmed\n[video/mp4 output is not kept]"
     ));
-    assert_eq!(
-        message.content[1],
-        Content::Image {
-            source: MediaSource::Base64 {
-                data: "iVBO".into()
-            },
-            mime: "image/png".into(),
-        }
-    );
-    assert_eq!(message.content.len(), 2);
+    assert_eq!(message.content.len(), 1);
 }

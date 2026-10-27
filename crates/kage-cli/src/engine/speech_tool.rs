@@ -3,10 +3,10 @@
 //!
 //! The tool is registered only when that table resolves to an endpoint
 //! and a model, so a config without one advertises the same tools as
-//! before. Its clip is the result's media (see [`ToolMedia`]): every
-//! client plays it with the call, but it is not kept in the session.
-//! A clip is therefore always saved in the workspace, under
-//! `generated/` when the call names no `path`.
+//! before. Its clip is the result's audio media (see [`ToolMedia`])
+//! and stays in the session. It is still saved in the workspace, under
+//! `generated/` when the call names no `path`, because not every
+//! client plays audio.
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -82,8 +82,8 @@ impl Tool for GenerateSpeechTool {
 
     fn description(&self) -> &'static str {
         "Read a text aloud through the configured speech server. The clip comes back with \
-         this result and plays where the client plays audio; it is not kept in the session, \
-         so it is always saved in the workspace, under generated/ unless `path` names a \
+         this result and plays where the client plays audio; it stays in the session and \
+         is also saved in the workspace, under generated/ unless `path` names a \
          place. Name a `path` when the user wants the file somewhere."
     }
 
@@ -191,13 +191,13 @@ impl Tool for GenerateSpeechTool {
             }
         };
         // A failed save keeps the clip in this result: it was made and
-        // paid for, and this result is the only other copy.
+        // paid for, and the session holds it even when no file does.
         let target =
             given_path.map_or_else(|| super::images::generated_name(clip.mime), str::to_owned);
         let saved = media_tool::save_in_workspace(cx.workdir(), &target, clip.mime, &clip.bytes);
         let mut text = format!(
             "Read {count} characters aloud ({}, {}). The clip plays where the client plays \
-             audio; it is not kept in the session.",
+             audio, and it is kept in the session.",
             clip.mime,
             kage_core::image::human_bytes(clip.bytes.len()),
         );
@@ -293,7 +293,7 @@ mod tests {
             output.text
         );
         assert!(
-            output.text.contains("it is not kept in the session"),
+            output.text.contains("it is kept in the session"),
             "{}",
             output.text
         );
