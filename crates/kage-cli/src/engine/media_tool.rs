@@ -376,6 +376,99 @@ pub(super) fn shown_path<'a>(workdir: &Path, saved: &'a Path) -> &'a Path {
     saved.strip_prefix(&root).unwrap_or(saved)
 }
 
+/// A local server for the media tools' tests.
+#[cfg(test)]
+pub(super) mod test_server {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+
+    /// What the server saw: each request read, head and body.
+    #[derive(Clone, Default)]
+    pub(in crate::engine) struct Seen(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl Seen {
+        /// How many requests arrived.
+        pub(in crate::engine) fn count(&self) -> usize {
+            self.0.lock().unwrap().len()
+        }
+
+        /// Whether any request holds `bytes`.
+        pub(in crate::engine) fn contains(&self, bytes: &[u8]) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.windows(bytes.len()).any(|w| w == bytes))
+        }
+
+        /// The JSON body of request `at`.
+        pub(in crate::engine) fn json_body(&self, at: usize) -> serde_json::Value {
+            let requests = self.0.lock().unwrap();
+            let request = &requests[at];
+            let start = request
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map_or(request.len(), |at| at + 4);
+            serde_json::from_slice(&request[start..]).unwrap()
+        }
+    }
+
+    /// Answers every request on a fresh port with a 200 carrying `body`
+    /// as `content_type`, and returns the base URL and what it saw.
+    pub(in crate::engine) fn serve(content_type: &'static str, body: Vec<u8>) -> (String, Seen) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let seen = Seen::default();
+        let requests = Arc::clone(&seen.0);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { return };
+                let request = read_request(&mut conn);
+                requests.lock().unwrap().push(request);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = conn.write_all(head.as_bytes());
+                let _ = conn.write_all(&body);
+            }
+        });
+        (url, seen)
+    }
+
+    /// Reads one request, headers and body. Closing a socket with
+    /// request bytes still unread resets the connection on Windows,
+    /// before the client reads the answer.
+    pub(in crate::engine) fn read_request(conn: &mut TcpStream) -> Vec<u8> {
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        let head_end = loop {
+            if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+            match conn.read(&mut buf) {
+                Ok(0) | Err(_) => return seen,
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+        while seen.len() < head_end + length {
+            match conn.read(&mut buf) {
+                Ok(0) | Err(_) => return seen,
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+            }
+        }
+        seen
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

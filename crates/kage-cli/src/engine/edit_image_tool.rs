@@ -332,10 +332,6 @@ impl Tool for EditImageTool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-    use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use kage_core::CancelFlag;
     use kage_core::config::MediaToolConfig;
@@ -343,6 +339,7 @@ mod tests {
     use super::super::image_tool::GENERATE_IMAGE_TOOL;
     use super::super::media_tool::DEFAULT_TIMEOUT;
     use super::super::media_tool::WithMediaTools;
+    use super::super::media_tool::test_server::{self, Seen};
     use super::*;
 
     /// A PNG cut after its `IHDR` size fields, enough for the sniffer.
@@ -368,85 +365,9 @@ mod tests {
         .to_string()
     }
 
-    /// What the test server saw: the request count and each request
-    /// read, head and body.
-    #[derive(Clone)]
-    struct Seen {
-        hits: Arc<AtomicUsize>,
-        requests: Arc<Mutex<Vec<Vec<u8>>>>,
-    }
-
-    impl Seen {
-        fn count(&self) -> usize {
-            self.hits.load(Ordering::SeqCst)
-        }
-
-        fn contains(&self, bytes: &[u8]) -> bool {
-            self.requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|request| request.windows(bytes.len()).any(|w| w == bytes))
-        }
-    }
-
-    /// Answers every request on a fresh port with one image, counting
-    /// the requests and keeping each one read.
+    /// Answers every request on a fresh port with one image.
     fn edit_server() -> (String, Seen) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1", listener.local_addr().unwrap());
-        let seen = Seen {
-            hits: Arc::new(AtomicUsize::new(0)),
-            requests: Arc::new(Mutex::new(Vec::new())),
-        };
-        let known = Arc::clone(&seen.hits);
-        let requests = Arc::clone(&seen.requests);
-        std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(mut conn) = conn else { return };
-                known.fetch_add(1, Ordering::SeqCst);
-                let request = read_request(&mut conn);
-                requests.lock().unwrap().push(request);
-                let body = png_answer();
-                let answer = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = conn.write_all(answer.as_bytes());
-            }
-        });
-        (url, seen)
-    }
-
-    /// Reads one request, headers and body. Closing a socket with
-    /// request bytes still unread resets the connection on Windows,
-    /// before the client reads the answer.
-    fn read_request(conn: &mut std::net::TcpStream) -> Vec<u8> {
-        let mut seen = Vec::new();
-        let mut buf = [0u8; 4096];
-        let head_end = loop {
-            if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
-                break at + 4;
-            }
-            match conn.read(&mut buf) {
-                Ok(0) | Err(_) => return seen,
-                Ok(n) => seen.extend_from_slice(&buf[..n]),
-            }
-        };
-        let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
-        let length: usize = head
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:"))
-            .and_then(|value| value.trim().parse().ok())
-            .unwrap_or(0);
-        while seen.len() < head_end + length {
-            match conn.read(&mut buf) {
-                Ok(0) | Err(_) => return seen,
-                Ok(n) => seen.extend_from_slice(&buf[..n]),
-            }
-        }
-        seen
+        test_server::serve("application/json", png_answer().into_bytes())
     }
 
     fn tool(base_url: &str) -> EditImageTool {

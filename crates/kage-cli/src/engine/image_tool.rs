@@ -226,7 +226,8 @@ impl Tool for GenerateImageTool {
 #[cfg(test)]
 mod tests {
     use super::super::media_tool::DEFAULT_TIMEOUT;
-    use std::io::{Read as _, Write as _};
+    use super::super::media_tool::test_server::{self, Seen, read_request};
+    use std::io::Write as _;
     use std::net::TcpListener;
     use std::path::Path;
 
@@ -241,63 +242,15 @@ mod tests {
         0, 1, 0, 0, 0, 1,
     ];
 
-    /// Answers every request on a fresh port with one image, and counts
-    /// the requests.
-    fn image_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1", listener.local_addr().unwrap());
-        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let seen = std::sync::Arc::clone(&hits);
-        std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(mut conn) = conn else { return };
-                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                read_request(&mut conn);
-                let body = serde_json::json!({
-                    "data": [{
-                        "b64_json": base64::engine::general_purpose::STANDARD.encode(PNG),
-                        "revised_prompt": "a red kite, drawn",
-                    }],
-                })
-                .to_string();
-                let answer = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = conn.write_all(answer.as_bytes());
-            }
+    /// Answers every request on a fresh port with one image.
+    fn image_server() -> (String, Seen) {
+        let body = serde_json::json!({
+            "data": [{
+                "b64_json": base64::engine::general_purpose::STANDARD.encode(PNG),
+                "revised_prompt": "a red kite, drawn",
+            }],
         });
-        (url, hits)
-    }
-
-    /// Reads one request, headers and body. Closing a socket with
-    /// request bytes still unread resets the connection on Windows,
-    /// before the client reads the answer.
-    fn read_request(conn: &mut std::net::TcpStream) {
-        let mut seen = Vec::new();
-        let mut buf = [0u8; 4096];
-        let head_end = loop {
-            if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
-                break at + 4;
-            }
-            match conn.read(&mut buf) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => seen.extend_from_slice(&buf[..n]),
-            }
-        };
-        let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
-        let length: usize = head
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:"))
-            .and_then(|value| value.trim().parse().ok())
-            .unwrap_or(0);
-        while seen.len() < head_end + length {
-            match conn.read(&mut buf) {
-                Ok(0) | Err(_) => return,
-                Ok(n) => seen.extend_from_slice(&buf[..n]),
-            }
-        }
+        test_server::serve("application/json", body.to_string().into_bytes())
     }
 
     fn tool(base_url: &str) -> GenerateImageTool {
@@ -389,7 +342,7 @@ mod tests {
             output.text
         );
         assert!(output.structured.unwrap()["path"].is_null());
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(hits.count(), 1);
     }
 
     #[test]
@@ -404,7 +357,7 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, ToolError::Path { .. }), "{path}: {err:?}");
         }
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(hits.count(), 0);
     }
 
     #[test]

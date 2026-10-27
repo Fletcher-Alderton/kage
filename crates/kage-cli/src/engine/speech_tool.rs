@@ -229,16 +229,13 @@ impl Tool for GenerateSpeechTool {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read as _, Write as _};
-    use std::net::TcpListener;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use kage_core::CancelFlag;
     use kage_core::config::{MediaToolConfig, SpeechToolConfig};
 
     use super::super::edit_image_tool::EDIT_IMAGE_TOOL;
     use super::super::image_tool::GENERATE_IMAGE_TOOL;
+    use super::super::media_tool::test_server::{self, Seen};
     use super::super::media_tool::{DEFAULT_TIMEOUT, WithMediaTools};
     use super::*;
 
@@ -247,86 +244,9 @@ mod tests {
         b'I', b'D', b'3', 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFB, 0x90, 0x64,
     ];
 
-    /// What the test server saw: the request count and each request's
-    /// body.
-    #[derive(Clone)]
-    struct Seen {
-        hits: Arc<AtomicUsize>,
-        bodies: Arc<Mutex<Vec<Vec<u8>>>>,
-    }
-
-    impl Seen {
-        fn count(&self) -> usize {
-            self.hits.load(Ordering::SeqCst)
-        }
-
-        fn body(&self, at: usize) -> serde_json::Value {
-            serde_json::from_slice(&self.bodies.lock().unwrap()[at]).unwrap()
-        }
-    }
-
-    /// Answers every request on a fresh port with one MP3, counting
-    /// the requests and keeping each one read, body and all.
+    /// Answers every request on a fresh port with one MP3.
     fn speech_server() -> (String, Seen) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1", listener.local_addr().unwrap());
-        let seen = Seen {
-            hits: Arc::new(AtomicUsize::new(0)),
-            bodies: Arc::new(Mutex::new(Vec::new())),
-        };
-        let known = Arc::clone(&seen.hits);
-        let bodies = Arc::clone(&seen.bodies);
-        std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(mut conn) = conn else { return };
-                known.fetch_add(1, Ordering::SeqCst);
-                let request = read_request(&mut conn);
-                let body = request
-                    .windows(4)
-                    .position(|w| w == b"\r\n\r\n")
-                    .map(|at| request[at + 4..].to_vec())
-                    .unwrap_or_default();
-                bodies.lock().unwrap().push(body);
-                let answer = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n",
-                    MP3.len()
-                );
-                let _ = conn.write_all(answer.as_bytes());
-                let _ = conn.write_all(MP3);
-            }
-        });
-        (url, seen)
-    }
-
-    /// Reads one request, headers and body. Closing a socket with
-    /// request bytes still unread resets the connection on Windows,
-    /// before the client reads the answer.
-    fn read_request(conn: &mut std::net::TcpStream) -> Vec<u8> {
-        let mut seen = Vec::new();
-        let mut buf = [0u8; 4096];
-        let head_end = loop {
-            if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
-                break at + 4;
-            }
-            match conn.read(&mut buf) {
-                Ok(0) | Err(_) => return seen,
-                Ok(n) => seen.extend_from_slice(&buf[..n]),
-            }
-        };
-        let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
-        let length: usize = head
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:"))
-            .and_then(|value| value.trim().parse().ok())
-            .unwrap_or(0);
-        while seen.len() < head_end + length {
-            match conn.read(&mut buf) {
-                Ok(0) | Err(_) => return seen,
-                Ok(n) => seen.extend_from_slice(&buf[..n]),
-            }
-        }
-        seen
+        test_server::serve("application/octet-stream", MP3.to_vec())
     }
 
     fn tool(base_url: &str) -> GenerateSpeechTool {
@@ -392,7 +312,7 @@ mod tests {
             output.text
         );
         assert_eq!(seen.count(), 1);
-        assert_eq!(seen.body(0)["input"], "a red kite");
+        assert_eq!(seen.json_body(0)["input"], "a red kite");
     }
 
     #[test]
@@ -440,25 +360,25 @@ mod tests {
         let first = voiced
             .execute(serde_json::json!({ "text": "one" }), &cx)
             .unwrap();
-        assert_eq!(seen.body(0)["voice"], "alloy");
-        assert!(seen.body(0).get("language").is_none());
+        assert_eq!(seen.json_body(0)["voice"], "alloy");
+        assert!(seen.json_body(0).get("language").is_none());
         assert_eq!(first.structured.unwrap()["voice"], "alloy");
 
         voiced
             .execute(serde_json::json!({ "text": "two", "voice": " nova " }), &cx)
             .unwrap();
-        assert_eq!(seen.body(1)["voice"], "nova", "the call's voice wins");
+        assert_eq!(seen.json_body(1)["voice"], "nova", "the call's voice wins");
 
         let third = tool(&url)
             .execute(serde_json::json!({ "text": "three" }), &cx)
             .unwrap();
-        assert!(seen.body(2).get("voice").is_none(), "no voice is sent");
+        assert!(seen.json_body(2).get("voice").is_none(), "no voice is sent");
         assert!(third.structured.unwrap()["voice"].is_null());
 
         tool(&url)
             .execute(serde_json::json!({ "text": "four", "language": "es" }), &cx)
             .unwrap();
-        assert_eq!(seen.body(3)["language"], "es");
+        assert_eq!(seen.json_body(3)["language"], "es");
         assert_eq!(seen.count(), 4);
     }
 
