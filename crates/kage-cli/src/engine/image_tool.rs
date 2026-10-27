@@ -161,7 +161,14 @@ impl Tool for GenerateImageTool {
                 error: ProviderError::Cancelled,
                 ..
             }) => return Err(ToolError::Cancelled),
-            Err(error) => return Ok(failure(&error)),
+            Err(error) => {
+                return Ok(failure(
+                    &error,
+                    self.timeout,
+                    "Image generation failed",
+                    "the prompt or size",
+                ));
+            }
         };
         let saved = match path {
             Some(path) => {
@@ -454,5 +461,156 @@ mod tests {
         .unwrap();
         let err = GenerateImageTool::from_config(&custom, &store).unwrap_err();
         assert!(err.contains("not of kind openai"), "{err}");
+    }
+
+    /// Execute one call against a server refusal, keeping its retry hint.
+    fn refused(status: &str, wait: Option<u64>, timeout_secs: u64) -> ToolOutput {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let body = r#"{"error":{"message":"the server's reason."}}"#;
+        let wait = wait
+            .map(|secs| format!("retry-after: {secs}\r\n"))
+            .unwrap_or_default();
+        let answer = format!(
+            "HTTP/1.1 {status}\r\n{wait}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            read_request(&mut conn);
+            conn.write_all(answer.as_bytes()).unwrap();
+        });
+        let workdir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let cx = ToolContext::new(workdir.path(), &cancel);
+        let mut tool = tool(&url);
+        tool.timeout = Duration::from_secs(timeout_secs);
+        let output = tool
+            .execute(serde_json::json!({ "prompt": "a kite" }), &cx)
+            .unwrap();
+        server.join().unwrap();
+        assert!(output.is_error);
+        assert!(output.media.is_empty());
+        assert!(output.structured.is_none());
+        assert!(!output.terminate);
+        assert!(
+            output.text.starts_with("Image generation failed:"),
+            "{}",
+            output.text
+        );
+        assert!(
+            output.text.contains("the server's reason.\n"),
+            "{}",
+            output.text
+        );
+        output
+    }
+
+    #[test]
+    fn a_403_tells_the_user_to_fix_the_key_or_service() {
+        let output = refused("403 Forbidden", None, 180);
+        assert!(
+            output.text.contains("key or service needs fixing"),
+            "{}",
+            output.text
+        );
+        assert!(output.text.contains("tell the user"), "{}", output.text);
+        assert!(
+            !output.text.contains("change the prompt"),
+            "{}",
+            output.text
+        );
+    }
+
+    #[test]
+    fn a_410_tells_the_user_to_fix_the_key_or_service() {
+        let output = refused("410 Gone", None, 180);
+        assert!(
+            output.text.contains("key or service needs fixing"),
+            "{}",
+            output.text
+        );
+        assert!(output.text.contains("tell the user"), "{}", output.text);
+        assert!(
+            !output.text.contains("change the prompt"),
+            "{}",
+            output.text
+        );
+    }
+
+    #[test]
+    fn a_413_asks_for_a_smaller_input() {
+        let output = refused("413 Content Too Large", None, 180);
+        assert!(
+            output
+                .text
+                .contains("input is larger than the server takes"),
+            "{}",
+            output.text
+        );
+        assert!(
+            output
+                .text
+                .contains("The input is larger than the server takes; make it smaller."),
+            "{}",
+            output.text
+        );
+        assert!(
+            !output.text.contains("change the prompt"),
+            "{}",
+            output.text
+        );
+    }
+
+    #[test]
+    fn a_429_with_a_short_wait_can_be_retried() {
+        for wait in [0, 7] {
+            let output = refused("429 Too Many Requests", Some(wait), 7);
+            let advice = format!(
+                "A retry may succeed; the server asks to wait {}s first.",
+                wait.max(1)
+            );
+            assert!(output.text.contains(&advice), "{}", output.text);
+            assert!(!output.text.contains("do not retry"), "{}", output.text);
+        }
+    }
+
+    #[test]
+    fn a_503_with_a_wait_past_the_tools_timeout_stops_retries() {
+        for (wait, timeout, shown) in [
+            (61, 60, "The server asks to wait 2 min."),
+            (41_230, 180, "The server asks to wait 11 h 28 min."),
+            (86_400, 3600, "The server asks to wait 24 h."),
+        ] {
+            let output = refused("503 Service Unavailable", Some(wait), timeout);
+            assert!(output.text.contains(shown), "{}", output.text);
+            assert!(
+                output
+                    .text
+                    .contains(". Do not retry in this turn; tell the user."),
+                "{}",
+                output.text
+            );
+            assert!(
+                !output.text.contains("A retry may succeed"),
+                "{}",
+                output.text
+            );
+        }
+    }
+
+    #[test]
+    fn other_refusals_keep_their_retry_advice() {
+        for (status, advice) in [
+            ("401 Unauthorized", "the key needs fixing, so tell the user"),
+            (
+                "400 Bad Request",
+                "change the prompt or size first, or tell the user",
+            ),
+            ("503 Service Unavailable", "A retry may succeed."),
+        ] {
+            let output = refused(status, None, 180);
+            assert!(output.text.contains(advice), "{}", output.text);
+        }
     }
 }

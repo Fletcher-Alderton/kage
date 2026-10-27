@@ -226,8 +226,14 @@ pub(super) fn is_size(size: &str) -> bool {
     })
 }
 
-/// A failed generation, said so the model knows whether to try again.
-pub(super) fn failure(error: &MediaError) -> ToolOutput {
+/// A failed media call with the tool's wording and advice on retries.
+/// Waits longer than `timeout` are left for the user rather than this turn.
+pub(super) fn failure(
+    error: &MediaError,
+    timeout: Duration,
+    verb: &str,
+    change: &str,
+) -> ToolOutput {
     let cause = match &error.error {
         ProviderError::Http { status, body } if body.is_empty() => {
             format!("the server answered {status}")
@@ -246,6 +252,15 @@ pub(super) fn failure(error: &MediaError) -> ToolOutput {
     let cause = cause.strip_suffix('.').unwrap_or(cause);
     let advice = if error.error.is_transient() {
         match error.retry_after {
+            Some(wait) if wait > timeout => {
+                let minutes = wait.as_secs().div_ceil(60);
+                let wait = match (minutes / 60, minutes % 60) {
+                    (0, minutes) => format!("{minutes} min"),
+                    (hours, 0) => format!("{hours} h"),
+                    (hours, minutes) => format!("{hours} h {minutes} min"),
+                };
+                format!("The server asks to wait {wait}. Do not retry in this turn; tell the user.")
+            }
             Some(wait) => format!(
                 "A retry may succeed; the server asks to wait {}s first.",
                 wait.as_secs().max(1)
@@ -254,14 +269,26 @@ pub(super) fn failure(error: &MediaError) -> ToolOutput {
         }
     } else if matches!(error.error, ProviderError::Auth(_)) {
         "Retrying will fail the same way: the key needs fixing, so tell the user.".to_owned()
-    } else {
-        "Retrying the same request will fail the same way; change the prompt or size \
-         first, or tell the user."
+    } else if matches!(
+        error.error,
+        ProviderError::Http {
+            status: 403 | 410,
+            ..
+        }
+    ) {
+        "Retrying will fail the same way: the key or service needs fixing, so tell the user."
             .to_owned()
+    } else if matches!(error.error, ProviderError::Http { status: 413, .. }) {
+        "The input is larger than the server takes; make it smaller.".to_owned()
+    } else {
+        format!(
+            "Retrying the same request will fail the same way; change {change} \
+             first, or tell the user."
+        )
     };
     ToolOutput {
         is_error: true,
-        text: format!("Image generation failed: {cause}.\n{advice}"),
+        text: format!("{verb}: {cause}.\n{advice}"),
         structured: None,
         terminate: false,
         media: Vec::new(),
