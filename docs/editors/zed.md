@@ -203,7 +203,7 @@ Each block of a `session/prompt` reaches the model:
 | `resource` with no text or blob | `[resource omitted]` |
 | `resource_link` to a `file://` URI | `Referenced file: <path>` |
 | other `resource_link` | `Referenced resource: <uri> (<name>)` |
-| `audio` | a line saying an audio clip was attached, since no model is sent the bytes yet; the clip stays in the session and replays |
+| `audio` | the clip, when the model lists audio input and its API takes it (OpenAI Chat Completions, MP3 or WAV only, and Gemini); otherwise a line saying an audio clip was attached. Either way the clip stays in the session and replays |
 | a block type this kage does not know | `[unsupported block omitted]` |
 
 Prompt text can mention MCP resources and run MCP prompts exactly as

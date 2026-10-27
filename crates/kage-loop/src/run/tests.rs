@@ -145,6 +145,18 @@ fn build_request_never_drops_below_reply_and_thinking_room() {
     assert_eq!(req.max_output_tokens, Some(8_192 + 16_384));
 }
 
+#[test]
+fn build_request_forwards_what_the_model_reads_and_produces() {
+    let mut cx = filled_context(1_000);
+    cx.accepts =
+        kage_core::Modalities::of(&[kage_core::Modality::Text, kage_core::Modality::Audio]);
+    cx.produces =
+        kage_core::Modalities::of(&[kage_core::Modality::Text, kage_core::Modality::Image]);
+    let req = build_request(&cx, &ToolRegistry::new(), &MockProvider::sequence(vec![]));
+    assert_eq!(req.accepts, cx.accepts);
+    assert_eq!(req.produces, cx.produces);
+}
+
 fn assistant_msg(content: Vec<Content>) -> Message {
     Message::new(Role::Assistant, content, None)
 }

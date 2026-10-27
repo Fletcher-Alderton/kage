@@ -175,6 +175,8 @@ pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
     // A model that draws gets its own images back, so it can keep
     // working on them; any other model reads a note in their place.
     let images = req.produces.contains(kage_core::Modality::Image);
+    // A model that hears gets the user's clips; any other reads a note.
+    let audio = req.accepts.contains(kage_core::Modality::Audio);
     let contents: Vec<Value> = req
         .messages
         .iter()
@@ -188,6 +190,7 @@ pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
                 &req.model,
                 placeholder,
                 images,
+                audio,
             )
         })
         .collect();
@@ -439,9 +442,10 @@ fn internal_message_to_gemini(
     model: &str,
     placeholder: bool,
     images: bool,
+    audio: bool,
 ) -> Option<Value> {
     let (role, parts) = match msg.role {
-        Role::User => ("user", convert_user_parts(&msg.content)),
+        Role::User => ("user", convert_user_parts(&msg.content, audio)),
         Role::Assistant => (
             "model",
             convert_assistant_parts(&msg.content, model, placeholder, images),
@@ -461,12 +465,15 @@ fn internal_message_to_gemini(
     }))
 }
 
-fn convert_user_parts(blocks: &[Content]) -> Vec<Value> {
+/// A user message's blocks as parts. With `audio`, a clip goes as
+/// inline data, as an image does; without, as a short note.
+fn convert_user_parts(blocks: &[Content], audio: bool) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"text": text})),
-            Content::Image { source, mime } => Some(image_part(source, mime)),
+            Content::Image { source, mime } => Some(media_part(source, mime)),
+            Content::Audio { source, mime } if audio => Some(media_part(source, mime)),
             Content::Audio { mime, .. } => {
                 Some(serde_json::json!({"text": Content::audio_note(mime)}))
             }
@@ -521,7 +528,7 @@ fn convert_assistant_parts(
                 parts.push(part);
             }
             Content::Image { source, mime } if images => {
-                let mut part = image_part(source, mime);
+                let mut part = media_part(source, mime);
                 if let Some(sig) = signature.take()
                     && part.get("inlineData").is_some()
                 {
@@ -583,7 +590,9 @@ fn tool_name_from_call_id<'a>(id: &'a ToolCallId, declared: &'a [ToolSpec]) -> &
     }
 }
 
-fn image_part(source: &kage_core::MediaSource, mime: &str) -> Value {
+/// An image or clip as a part: its bytes inline, a link as file data,
+/// or a missing blob as a line saying so.
+fn media_part(source: &kage_core::MediaSource, mime: &str) -> Value {
     match source {
         kage_core::MediaSource::Base64 { data } => serde_json::json!({
             "inlineData": {
@@ -1490,6 +1499,37 @@ mod tests {
         assert_eq!(
             contents[2]["parts"][0]["functionResponse"]["response"]["output"],
             format!("clipped\n{}", Content::audio_note("audio/mpeg"))
+        );
+    }
+
+    /// A model that hears gets the user's clip inline; its own clip
+    /// still goes as a note.
+    #[test]
+    fn a_model_that_hears_gets_the_users_clip_inline() {
+        let audio = || kage_core::Content::Audio {
+            source: kage_core::MediaSource::Base64 {
+                data: "QUJD".into(),
+            },
+            mime: "audio/mpeg".into(),
+        };
+        let mut req = StreamRequest::new(
+            "gemini-2.5-pro",
+            vec![
+                Arc::new(Message::new(Role::User, vec![audio()], None)),
+                Arc::new(Message::new(Role::Assistant, vec![audio()], None)),
+            ],
+        );
+        req.accepts =
+            kage_core::Modalities::of(&[kage_core::Modality::Text, kage_core::Modality::Audio]);
+        let body = build_request_body(&req);
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(
+            contents[0]["parts"][0],
+            serde_json::json!({"inlineData": {"mimeType": "audio/mpeg", "data": "QUJD"}})
+        );
+        assert_eq!(
+            contents[1]["parts"][0]["text"],
+            Content::produced_media_note("audio/mpeg")
         );
     }
 

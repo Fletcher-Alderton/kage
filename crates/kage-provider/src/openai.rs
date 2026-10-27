@@ -258,13 +258,15 @@ fn build_request_body(
         .iter()
         .rposition(|m| m.role == Role::User)
         .map_or(0, |i| i + 1);
+    // A model that hears gets the user's clips; any other reads a note.
+    let audio = req.accepts.contains(kage_core::Modality::Audio);
     for (i, msg) in req.messages.iter().enumerate() {
         let replay = match interleaved {
             None => ThinkingReplay::Text,
             Some(field) if i >= turn_start => ThinkingReplay::Field(field),
             Some(_) => ThinkingReplay::Drop,
         };
-        if let Some(converted) = internal_message_to_openai(msg, replay, &req.model) {
+        if let Some(converted) = internal_message_to_openai(msg, replay, &req.model, audio) {
             messages.extend(converted);
         }
     }
@@ -373,10 +375,11 @@ fn internal_message_to_openai(
     msg: &Message,
     replay: ThinkingReplay,
     model: &str,
+    audio: bool,
 ) -> Option<Vec<Value>> {
     match msg.role {
         Role::User => {
-            let blocks = convert_user_blocks(&msg.content);
+            let blocks = convert_user_blocks(&msg.content, audio);
             if blocks.is_empty() {
                 None
             } else {
@@ -392,12 +395,24 @@ fn internal_message_to_openai(
     }
 }
 
-fn convert_user_blocks(blocks: &[Content]) -> Vec<Value> {
+/// A user message's blocks as content parts. With `audio`, an MP3 or WAV
+/// clip goes as `input_audio`, the only formats Chat Completions takes;
+/// otherwise, and for any other clip, as a short note.
+fn convert_user_blocks(blocks: &[Content], audio: bool) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"text","text":text})),
             Content::Image { source, mime } => Some(image_to_openai(source, mime)),
+            Content::Audio {
+                source: kage_core::MediaSource::Base64 { data },
+                mime,
+            } if audio && let Some(format) = kage_core::audio::extension_for(mime) => {
+                Some(serde_json::json!({
+                    "type": "input_audio",
+                    "input_audio": {"data": data, "format": format},
+                }))
+            }
             Content::Audio { mime, .. } => Some(serde_json::json!({
                 "type":"text",
                 "text": Content::audio_note(mime),
@@ -1099,6 +1114,51 @@ mod tests {
         assert_eq!(
             messages[2]["content"],
             format!("clipped\n{}", Content::audio_note("audio/mpeg"))
+        );
+    }
+
+    /// A model that hears gets the user's MP3 or WAV clip as
+    /// `input_audio`; a clip of another type, and the model's own and its
+    /// tools' clips, still go as notes.
+    #[test]
+    fn a_model_that_hears_gets_the_users_clip_as_input_audio() {
+        let clip = |mime: &str| Content::Audio {
+            source: kage_core::MediaSource::Base64 {
+                data: "QUJD".into(),
+            },
+            mime: mime.into(),
+        };
+        let mut req = StreamRequest::new(
+            "gpt-audio",
+            vec![
+                Arc::new(Message::new(
+                    Role::User,
+                    vec![clip("audio/mpeg"), clip("audio/wav"), clip("audio/ogg")],
+                    None,
+                )),
+                Arc::new(Message::new(
+                    Role::Assistant,
+                    vec![clip("audio/mpeg")],
+                    None,
+                )),
+            ],
+        );
+        req.accepts =
+            kage_core::Modalities::of(&[kage_core::Modality::Text, kage_core::Modality::Audio]);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
+        let user = &body["messages"][0]["content"];
+        assert_eq!(
+            user[0],
+            serde_json::json!({"type": "input_audio", "input_audio": {"data": "QUJD", "format": "mp3"}})
+        );
+        assert_eq!(user[1]["input_audio"]["format"], "wav");
+        assert_eq!(
+            user[2],
+            serde_json::json!({"type": "text", "text": Content::audio_note("audio/ogg")})
+        );
+        assert_eq!(
+            body["messages"][1]["content"],
+            Content::produced_media_note("audio/mpeg")
         );
     }
 
@@ -1995,7 +2055,7 @@ data: [DONE]\n\n";
     }
 
     fn data_url(blocks: &[Content]) -> String {
-        let block = convert_user_blocks(blocks).remove(0);
+        let block = convert_user_blocks(blocks, false).remove(0);
         block["image_url"]["url"]
             .as_str()
             .expect("image url")

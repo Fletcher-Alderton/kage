@@ -2106,6 +2106,7 @@ fn clone_shallow(cx: &AgentContext) -> AgentContext {
         thinking_level: cx.thinking_level,
         reasoning: cx.reasoning,
         produces: cx.produces,
+        accepts: cx.accepts,
         confine_paths: cx.confine_paths,
         budget: cx.budget,
         session: None,
@@ -2304,7 +2305,8 @@ fn requeue_backoff(
 pub(crate) const AUTO_THINKING: &str = "default";
 
 /// Set what `cx` takes from `model` (`provider/model`): its prompt
-/// identity, window, output cap and thinking settings.
+/// identity, window, output cap, thinking settings and the media it
+/// reads and produces.
 fn fit_context(cx: &mut AgentContext, registry: &ProviderRegistry, model: &str) {
     crate::runtime_env::update_model(&mut cx.system_prompt, model);
     if let Some(window) = crate::runtime_env::context_window_for(registry, model) {
@@ -2313,6 +2315,7 @@ fn fit_context(cx: &mut AgentContext, registry: &ProviderRegistry, model: &str) 
     cx.max_output_tokens = crate::runtime_env::max_output_tokens_for(registry, model);
     cx.reasoning = crate::runtime_env::reasoning_for(registry, model);
     cx.produces = crate::runtime_env::produces_for(registry, model);
+    cx.accepts = crate::runtime_env::input_for(registry, model);
 }
 
 /// Refresh the parts of `state` that follow its model and chosen

@@ -340,7 +340,9 @@ since kage has no catalog entry for it:
   and limits the levels to these.
 - `input`: the kinds of input the model takes. Attaching an image to a
   model whose `input` leaves out `image` warns, and the image is not
-  sent.
+  sent. An audio clip you attach is sent only to a model whose `input`
+  lists `audio` (as MP3 or WAV for `kind = "openai"`); any other model
+  reads a line saying a clip was there.
 - `interleaved`: for `kind = "openai"`, the assistant message field
   the model reads its own reasoning back from during a tool loop,
   `reasoning_content` or `reasoning_details` (the models.dev

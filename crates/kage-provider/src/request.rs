@@ -61,6 +61,11 @@ pub struct StreamRequest {
     /// Empty means text only.
     #[serde(default, skip_serializing_if = "Modalities::is_empty")]
     pub produces: Modalities,
+    /// Media the model reads besides text. A provider sends the user's
+    /// audio as audio only when this holds [`kage_core::Modality::Audio`],
+    /// and as a short note otherwise. Empty means not known.
+    #[serde(default, skip_serializing_if = "Modalities::is_empty")]
+    pub accepts: Modalities,
     /// Id of the conversation the request belongs to, for gateways
     /// that route or cache per conversation. `None` for one-off
     /// requests outside a session.
@@ -86,6 +91,7 @@ impl StreamRequest {
             level: None,
             reasoning: Reasoning::Unknown,
             produces: Modalities::default(),
+            accepts: Modalities::default(),
             session: None,
         }
     }

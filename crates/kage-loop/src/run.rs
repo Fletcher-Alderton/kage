@@ -589,6 +589,7 @@ fn build_request(
     req.level = cx.reasoning.resolve(cx.thinking_level);
     req.reasoning = cx.reasoning;
     req.produces = cx.produces;
+    req.accepts = cx.accepts;
     req.session.clone_from(&cx.session);
     req
 }

@@ -99,6 +99,10 @@ pub struct AgentContext {
     /// from the model catalog and forwarded on every request. Empty
     /// means text only.
     pub produces: kage_core::Modalities,
+    /// Media the active model reads besides text, set by the host from
+    /// the model catalog and forwarded on every request. Empty means
+    /// not known, and the user's audio goes as a note.
+    pub accepts: kage_core::Modalities,
     /// Path confinement for the built-in file tools: when `true`, every
     /// [`kage_tools::ToolContext`] the dispatcher builds resolves paths
     /// through escape-checked resolution, so reads and writes stay under
@@ -135,6 +139,7 @@ impl AgentContext {
             thinking_level: None,
             reasoning: kage_core::Reasoning::Unknown,
             produces: kage_core::Modalities::default(),
+            accepts: kage_core::Modalities::default(),
             confine_paths: true,
             budget: TokenBudget::default(),
             session: None,

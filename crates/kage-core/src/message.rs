@@ -150,7 +150,7 @@ impl Content {
     }
 
     /// The text an audio clip stands as in a user or tool-result
-    /// position: no model is sent audio yet, so the bytes stay behind.
+    /// position, for a model that is not sent the bytes.
     #[must_use]
     pub fn audio_note(mime: &str) -> String {
         format!("[an audio clip ({mime}) was here; it is not sent to the model]")
