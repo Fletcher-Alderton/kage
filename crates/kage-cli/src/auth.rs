@@ -632,13 +632,42 @@ pub fn run_list() -> ExitCode {
         eprintln!("kage: config: {e}; custom providers are not listed");
         kage_core::config::Config::default()
     });
-    let _ = write_list(
-        &mut io::stdout().lock(),
-        &provider_keys(&config),
-        &store,
-        Utc::now(),
-    );
+    let mut keys = provider_keys(&config);
+    keys.extend(media_tool_keys(&config, &store));
+    let _ = write_list(&mut io::stdout().lock(), &keys, &store, Utc::now());
     ExitCode::SUCCESS
+}
+
+/// The media tools that call an endpoint of their own (`base_url` set),
+/// whose key is read from their `api_key_env` or saved under the tool's
+/// name. One with neither sends no key, which a self-hosted server may
+/// not need. A tool that borrows a `provider` uses that provider's key,
+/// which already has its own row.
+fn media_tool_keys(config: &kage_core::config::Config, store: &AuthStore) -> Vec<ProviderKey> {
+    let tools = &config.tools;
+    [
+        (crate::engine::GENERATE_IMAGE_TOOL, &tools.generate_image),
+        (crate::engine::EDIT_IMAGE_TOOL, &tools.edit_image),
+        (
+            crate::engine::GENERATE_SPEECH_TOOL,
+            &tools.generate_speech.endpoint,
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, cfg)| {
+        cfg.base_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty())
+    })
+    .map(|(id, cfg)| {
+        let env = cfg.api_key_env.clone().unwrap_or_default();
+        ProviderKey {
+            id: id.to_owned(),
+            keyless: env.is_empty() && store.credential(id).is_none(),
+            env,
+        }
+    })
+    .collect()
 }
 
 /// Render the `kage auth list` table, sizing the id column to the
@@ -740,6 +769,16 @@ fn select_provider(
         );
         kage_tui::PickItem::simple(id.clone())
             .with_label(label)
+            .with_badge(badge)
+    }));
+    items.extend(crate::engine::MEDIA_TOOLS.iter().map(|tool| {
+        let badge = if store.credential(tool).is_some() {
+            '*'
+        } else {
+            '-'
+        };
+        kage_tui::PickItem::simple(*tool)
+            .with_label(format!("{tool} (media tool endpoint)"))
             .with_badge(badge)
     }));
     match kage_tui::pick("Select a provider", &items) {
@@ -1096,6 +1135,25 @@ mod tests {
         let synth = keys.iter().find(|k| k.id == "synth").unwrap();
         assert_eq!(synth.env, "SYNTH_API_KEY", "the env name is synthesized");
         assert!(!synth.keyless);
+    }
+
+    #[test]
+    fn list_shows_media_tools_that_call_their_own_endpoint() {
+        let config: kage_core::config::Config = toml::from_str(
+            "[tools.generate_image]\nprovider = \"openai\"\nmodel = \"m\"\n\
+             [tools.generate_speech]\nbase_url = \"http://tts:1/v1\"\n\
+             api_key_env = \"TTS_KEY\"\nmodel = \"tts\"\n\
+             [tools.edit_image]\nbase_url = \"http://img:1/v1\"\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        let keys = media_tool_keys(&config, &AuthStore::empty());
+
+        let ids: Vec<&str> = keys.iter().map(|k| k.id.as_str()).collect();
+        assert_eq!(ids, ["edit_image", "generate_speech"]);
+        assert_eq!(keys[0].env, "");
+        assert!(keys[0].keyless, "no variable and no saved key sends no key");
+        assert_eq!(keys[1].env, "TTS_KEY");
+        assert!(!keys[1].keyless);
     }
 
     #[test]

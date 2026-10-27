@@ -212,9 +212,10 @@ match wins:
    (`~/.local/share/kage/auth.json`, mode `0600`).
 
 `kage auth login` with no argument opens a picker that also lists your
-custom providers. Rows marked `*` already have a stored credential.
-`kage auth list` shows where each provider's key would come from,
-custom providers included. Inside the TUI, `/login [provider]` runs
+custom providers and the media tools. Rows marked `*` already have a
+stored credential. `kage auth list` shows where each provider's key
+would come from, custom providers included, and each media tool that
+calls a `base_url` of its own. Inside the TUI, `/login [provider]` runs
 the same flow: the UI suspends, the credential prompt takes over the
 terminal, and the model list refreshes in place when a key is saved.
 
