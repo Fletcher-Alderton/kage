@@ -130,10 +130,13 @@ pub(crate) fn call(
                 .and_then(|value| value.to_str().ok()),
             chrono::Utc::now(),
         );
-        return Err(MediaError {
-            error: crate::http::read_error_body(status, response),
-            retry_after,
-        });
+        // A refusal's body is read under the same watch on `cancel` as
+        // an answer's, so a server that trickles it cannot hold a cancel.
+        let error = crate::cancelable::cancellable_call(cancel, &kill, move || {
+            Ok(crate::http::read_error_body(status, response))
+        })
+        .unwrap_or_else(|error| error);
+        return Err(MediaError { error, retry_after });
     }
     let body = crate::cancelable::cancellable_call(cancel, &kill, move || {
         read_capped(response.into_body().into_reader(), MAX_RESPONSE_BYTES, noun)

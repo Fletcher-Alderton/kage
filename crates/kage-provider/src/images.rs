@@ -671,6 +671,38 @@ mod tests {
     }
 
     #[test]
+    fn cancel_ends_a_refusal_whose_body_stops_arriving() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            crate::testing::read_request(&mut conn);
+            conn.write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\n\
+                  content-length: 4096\r\n\r\n{\"error\":",
+            )
+            .unwrap();
+            std::thread::sleep(Duration::from_secs(10));
+        });
+        let cancel = CancelFlag::new();
+        let trigger = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            trigger.cancel();
+        });
+        let started = Instant::now();
+        let err = generate(
+            &endpoint(format!("http://{addr}/v1")),
+            &request(),
+            Duration::from_secs(30),
+            &cancel,
+        )
+        .unwrap_err();
+        assert!(matches!(err.error, ProviderError::Cancelled), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
     fn a_body_that_stops_arriving_is_cut_off_at_the_timeout() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
