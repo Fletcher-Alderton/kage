@@ -254,6 +254,7 @@ fn a_tool_that_runs_alone_is_refused_beside_others() {
         workdir,
         &cancel,
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |_| {},
@@ -271,6 +272,7 @@ fn a_tool_that_runs_alone_is_refused_beside_others() {
         workdir,
         &cancel,
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |_| {},
@@ -291,6 +293,7 @@ fn a_tool_that_runs_alone_runs_by_itself() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |_| {},
@@ -347,6 +350,7 @@ fn tools_see_their_own_call_id() {
         workdir,
         &cancel,
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |_| {},
@@ -359,6 +363,7 @@ fn tools_see_their_own_call_id() {
         workdir,
         &cancel,
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |_| {},
@@ -380,6 +385,7 @@ fn tool_updates_are_emitted_before_tool_call_end() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -423,6 +429,7 @@ fn unknown_tool_error_names_the_registered_tools() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -460,6 +467,7 @@ fn tool_updates_are_emitted_while_the_tool_runs() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         MessageId::new(),
         &mut hooks,
         &mut |ev| {
@@ -495,6 +503,7 @@ fn parallel_dispatch_emits_tool_updates_per_call() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -526,6 +535,7 @@ fn dispatches_in_input_order_and_appends_results() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -561,6 +571,7 @@ fn unknown_tool_yields_error_output_not_loop_failure() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -591,6 +602,7 @@ fn tool_error_converts_to_error_output() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -641,6 +653,7 @@ fn before_tool_call_can_short_circuit_execution() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -679,6 +692,7 @@ fn after_tool_call_can_rewrite_output() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -747,6 +761,7 @@ fn parallel_dispatch_preserves_input_order() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -792,6 +807,7 @@ fn parallel_dispatch_actually_runs_concurrently() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -851,6 +867,7 @@ fn parallel_dispatch_honors_before_tool_call_short_circuit() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -881,6 +898,7 @@ fn cancelled_batch_synthesizes_error_results() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -952,6 +970,7 @@ fn mid_batch_cancel_synthesizes_remaining_results() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -1028,6 +1047,7 @@ fn parallel_batch_keeps_successful_outputs_when_one_panics() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -1073,6 +1093,7 @@ fn sequential_batch_reports_the_panic_not_a_synthetic_cancel() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -1120,6 +1141,7 @@ fn parallel_cancelled_call_synthesizes_and_keeps_others() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -1184,6 +1206,7 @@ fn dispatch_propagates_confine_flag_to_tool_context() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -1200,6 +1223,7 @@ fn dispatch_propagates_confine_flag_to_tool_context() {
         std::path::Path::new("/tmp"),
         &cancel,
         true,
+        &[],
         parent,
         &mut hooks,
         &mut |_| {},
@@ -1257,6 +1281,7 @@ fn execution_start_marks_each_call_right_before_it_runs() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut BlockErr,
         &mut |ev| emitted.push(ev),
@@ -1286,6 +1311,7 @@ fn parallel_execution_start_skips_short_circuited_calls() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut BlockErr,
         &mut |ev| emitted.push(ev),
@@ -1315,6 +1341,7 @@ fn parallel_dispatch_ends_each_call_when_it_finishes() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |ev| {
@@ -1373,6 +1400,7 @@ fn parallel_panic_yields_an_error_for_its_own_call() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut BlockErr,
         &mut |ev| emitted.push(ev),
@@ -1456,6 +1484,7 @@ fn confined_dispatch_rejects_workdir_escape() {
         cx.workdir.as_path(),
         &CancelFlag::new(),
         cx.confine_paths,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |_| {},
@@ -1477,6 +1506,7 @@ fn confined_dispatch_rejects_workdir_escape() {
         cx.workdir.as_path(),
         &CancelFlag::new(),
         cx.confine_paths,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |_| {},
@@ -1490,6 +1520,61 @@ fn confined_dispatch_rejects_workdir_escape() {
             assert!(output.contains("escapes workdir"), "{output}");
         }
         other => panic!("unexpected content: {other:?}"),
+    }
+}
+
+/// Answers with how many messages its context holds.
+#[derive(Debug)]
+struct HistoryProbe;
+
+impl Tool for HistoryProbe {
+    fn name(&self) -> &'static str {
+        "history_probe"
+    }
+    fn description(&self) -> &'static str {
+        "counts the conversation it was handed"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput {
+            is_error: false,
+            text: cx.history().len().to_string(),
+            structured: None,
+            terminate: false,
+            media: Vec::new(),
+        })
+    }
+}
+
+#[test]
+fn both_dispatchers_hand_the_conversation_to_a_tool() {
+    let tools = ToolRegistry::new().with(Arc::new(HistoryProbe));
+    let history = [
+        Arc::new(kage_provider::testing::user_msg("one")),
+        Arc::new(kage_provider::testing::user_msg("two")),
+    ];
+    for dispatch in [dispatch_tool_calls, dispatch_tool_calls_parallel] {
+        let outcome = dispatch(
+            vec![pending("history_probe", serde_json::json!({}))],
+            &tools,
+            Path::new("/tmp"),
+            &CancelFlag::new(),
+            false,
+            &history,
+            MessageId::new(),
+            &mut NoopHooks,
+            &mut |_| {},
+        );
+        assert_eq!(outputs_of(&outcome), ["2"]);
     }
 }
 
@@ -1554,6 +1639,7 @@ fn cancelable_wait_aborts_a_parallel_batch_that_ignores_cancel() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         MessageId::new(),
         &mut hooks,
         &mut |_| {},
@@ -1600,6 +1686,7 @@ fn cancelable_wait_aborts_a_sequential_batch_that_ignores_cancel() {
         std::path::Path::new("/tmp"),
         &cancel,
         false,
+        &[],
         MessageId::new(),
         &mut hooks,
         &mut |_| {},
@@ -1683,6 +1770,7 @@ fn worker_pool_bounds_concurrent_tool_threads() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |_| {},
@@ -1760,6 +1848,7 @@ fn bounded_progress_channel_delivers_every_update_under_a_slow_host() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |ev| {
@@ -1825,6 +1914,7 @@ fn oversized_structured_output_is_dropped_from_the_end_event() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |ev| big_events.push(ev),
@@ -1836,6 +1926,7 @@ fn oversized_structured_output_is_dropped_from_the_end_event() {
         std::path::Path::new("/tmp"),
         &CancelFlag::new(),
         false,
+        &[],
         MessageId::new(),
         &mut NoopHooks,
         &mut |ev| small_events.push(ev),

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kage_core::{CancelFlag, Risk, ToolCallId, ToolOutput, ToolUpdate};
+use kage_core::{CancelFlag, Message, Risk, ToolCallId, ToolOutput, ToolUpdate};
 
 use crate::ToolError;
 use crate::path::{resolve, resolve_under};
@@ -98,8 +98,9 @@ pub trait Tool: Send + Sync + std::fmt::Debug {
 /// the tool should poll at safe points for long-running work, an optional
 /// [`ProgressSink`] long-running tools call to stream progress, the
 /// opt-in path-confinement flag that switches [`ToolContext::resolve_path`]
-/// to escape-checked resolution, and the id of the call being served when
-/// the dispatcher knows it.
+/// to escape-checked resolution, the id of the call being served when
+/// the dispatcher knows it, and the conversation so far when the
+/// dispatcher hands it over.
 #[derive(Clone)]
 pub struct ToolContext<'a> {
     workdir: &'a Path,
@@ -107,6 +108,7 @@ pub struct ToolContext<'a> {
     progress: Option<Arc<dyn ProgressSink>>,
     confine: bool,
     call_id: Option<&'a ToolCallId>,
+    history: &'a [Arc<Message>],
 }
 
 impl std::fmt::Debug for ToolContext<'_> {
@@ -116,13 +118,14 @@ impl std::fmt::Debug for ToolContext<'_> {
             .field("has_progress", &self.progress.is_some())
             .field("confine", &self.confine)
             .field("call_id", &self.call_id)
+            .field("history", &self.history.len())
             .finish_non_exhaustive()
     }
 }
 
 impl<'a> ToolContext<'a> {
-    /// Construct a context with no progress sink, no path confinement
-    /// and no call id.
+    /// Construct a context with no progress sink, no path confinement,
+    /// no call id and no history.
     #[must_use]
     pub fn new(workdir: &'a Path, cancel: &'a CancelFlag) -> Self {
         Self {
@@ -131,6 +134,7 @@ impl<'a> ToolContext<'a> {
             progress: None,
             confine: false,
             call_id: None,
+            history: &[],
         }
     }
 
@@ -139,6 +143,14 @@ impl<'a> ToolContext<'a> {
     #[must_use]
     pub fn with_call_id(mut self, id: &'a ToolCallId) -> Self {
         self.call_id = Some(id);
+        self
+    }
+
+    /// Hand over the conversation so far, so a tool can read what it
+    /// holds, such as the images in it.
+    #[must_use]
+    pub fn with_history(mut self, history: &'a [Arc<Message>]) -> Self {
+        self.history = history;
         self
     }
 
@@ -177,6 +189,13 @@ impl<'a> ToolContext<'a> {
     #[must_use]
     pub fn call_id(&self) -> Option<&ToolCallId> {
         self.call_id
+    }
+
+    /// The conversation so far, oldest first. Empty when the caller
+    /// handed none over.
+    #[must_use]
+    pub fn history(&self) -> &[Arc<Message>] {
+        self.history
     }
 
     /// Resolve `candidate` against the context workdir. Unconfined

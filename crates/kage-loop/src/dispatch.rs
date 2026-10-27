@@ -121,12 +121,17 @@ struct Job {
 /// [`LoopError::Cancelled`] through `done`, and the workers are left to
 /// finish in the background (their late results land in a dropped
 /// receiver and are ignored).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the loop hands over its run state unbundled"
+)]
 fn execute_live<F, D>(
     calls: &[&PendingToolCall],
     tools: &ToolRegistry,
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
+    history: &[Arc<Message>],
     emit: &mut F,
     mut done: D,
 ) where
@@ -156,6 +161,7 @@ fn execute_live<F, D>(
     let owned_tools = tools.clone();
     let owned_workdir = workdir.to_path_buf();
     let owned_cancel = cancel.clone();
+    let owned_history: Arc<[Arc<Message>]> = history.into();
     let worker_count = calls.len().min(MAX_TOOL_WORKERS);
     for _ in 0..worker_count {
         let job_rx = job_rx.clone();
@@ -163,6 +169,7 @@ fn execute_live<F, D>(
         let tools = owned_tools.clone();
         let workdir = owned_workdir.clone();
         let cancel = owned_cancel.clone();
+        let history = Arc::clone(&owned_history);
         std::thread::spawn(move || {
             for job in job_rx {
                 // Work queued behind a cancel never starts: the batch
@@ -188,6 +195,7 @@ fn execute_live<F, D>(
                         &workdir,
                         &cancel,
                         confine_paths,
+                        &history,
                         Some(sink),
                     )
                 }));
@@ -449,6 +457,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
+    history: &[Arc<Message>],
     parent: MessageId,
     hooks: &mut dyn Hooks,
     emit: &mut F,
@@ -472,6 +481,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
                     workdir,
                     cancel,
                     confine_paths,
+                    history,
                     emit,
                     |_, _, done| result = Some(done),
                 );
@@ -551,6 +561,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
+    history: &[Arc<Message>],
     parent: MessageId,
     hooks: &mut dyn Hooks,
     emit: &mut F,
@@ -614,6 +625,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
             workdir,
             cancel,
             confine_paths,
+            history,
             emit,
             |emit, index, raw| finish(emit, to_run[index], raw),
         );
@@ -640,6 +652,7 @@ fn execute(
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
+    history: &[Arc<Message>],
     progress: Option<Arc<dyn ProgressSink>>,
 ) -> Result<ToolOutput, LoopError> {
     let Some(tool) = tools.get(&call.name) else {
@@ -659,7 +672,9 @@ fn execute(
         });
     };
 
-    let mut cx = ToolContext::new(workdir, cancel).with_call_id(&call.id);
+    let mut cx = ToolContext::new(workdir, cancel)
+        .with_call_id(&call.id)
+        .with_history(history);
     if confine_paths {
         cx = cx.with_confine();
     }

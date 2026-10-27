@@ -324,6 +324,7 @@ where
                 &workdir,
                 cancel,
                 cx.confine_paths,
+                &cx.history,
                 assistant_id,
                 hooks,
                 &mut emit,
