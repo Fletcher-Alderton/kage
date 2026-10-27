@@ -142,9 +142,31 @@ pub(crate) fn call(
     Ok(body)
 }
 
-/// Whether a bad-request response names an unsupported field.
+/// Whether a bad-request response names `field` as its cause: as the
+/// `OpenAI` `error.param`, or in the server's message. The rest of a
+/// JSON body is not searched, since a server may echo the request
+/// there. A body that is not JSON is searched whole.
 pub(crate) fn names_field(error: &MediaError, field: &str) -> bool {
-    matches!(&error.error, ProviderError::Http { status: 400, body } if body.contains(field))
+    let ProviderError::Http { status: 400, body } = &error.error else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.contains(field);
+    };
+    json.pointer("/error/param")
+        .and_then(serde_json::Value::as_str)
+        == Some(field)
+        || message_in(&json).is_some_and(|message| message.contains(field))
+}
+
+/// The server's own message in an error body: the `OpenAI` shape
+/// `error.message`, a top-level `message`, or `errors.message`, which
+/// some image servers send.
+fn message_in(json: &serde_json::Value) -> Option<&str> {
+    json.pointer("/error/message")
+        .or_else(|| json.get("message"))
+        .or_else(|| json.pointer("/errors/message"))
+        .and_then(serde_json::Value::as_str)
 }
 
 /// A transport failure once `deadline` has passed, said as such: the
@@ -178,20 +200,13 @@ pub(crate) fn read_capped(
     Ok(body)
 }
 
-/// `error` with the server's own message in place of an error body:
-/// the `OpenAI` shape `error.message`, a top-level `message`, or
-/// `errors.message`, which some image servers send. A body in none of
-/// these shapes is kept as sent.
+/// `error` with the server's own message (see [`message_in`]) in place
+/// of an error body. A body in none of those shapes is kept as sent.
 pub(crate) fn server_message(error: ProviderError) -> ProviderError {
     let message = |body: &str| {
         let json = serde_json::from_str::<serde_json::Value>(body).ok();
         json.as_ref()
-            .and_then(|json| {
-                json.pointer("/error/message")
-                    .or_else(|| json.get("message"))
-                    .or_else(|| json.pointer("/errors/message"))
-                    .and_then(serde_json::Value::as_str)
-            })
+            .and_then(message_in)
             .map_or_else(|| body.trim().to_owned(), |text| text.trim().to_owned())
     };
     match error {
@@ -210,6 +225,39 @@ pub(crate) fn server_message(error: ProviderError) -> ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bad_request(body: &str) -> MediaError {
+        ProviderError::Http {
+            status: 400,
+            body: body.to_owned(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn a_field_is_named_by_its_param_or_the_message_only() {
+        let by_param = bad_request(r#"{"error":{"message":"Unsupported.","param":"language"}}"#);
+        assert!(names_field(&by_param, "language"));
+        let by_message = bad_request(r#"{"error":{"message":"Unknown parameter: 'language'."}}"#);
+        assert!(names_field(&by_message, "language"));
+        let top_level = bad_request(r#"{"message":"response_format is not supported"}"#);
+        assert!(names_field(&top_level, "response_format"));
+        let plain = bad_request("unknown field language");
+        assert!(names_field(&plain, "language"));
+
+        let echoed = bad_request(
+            r#"{"error":{"message":"the text is too long","input":"say the language name"}}"#,
+        );
+        assert!(!names_field(&echoed, "language"));
+        let other_param = bad_request(r#"{"error":{"message":"Too long.","param":"input"}}"#);
+        assert!(!names_field(&other_param, "language"));
+        let not_400: MediaError = ProviderError::Http {
+            status: 422,
+            body: r#"{"error":{"param":"language"}}"#.to_owned(),
+        }
+        .into();
+        assert!(!names_field(&not_400, "language"));
+    }
 
     #[test]
     fn a_body_over_the_cap_is_refused() {
