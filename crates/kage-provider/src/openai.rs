@@ -946,6 +946,10 @@ fn image_links(text: &str) -> Vec<&str> {
 
 /// The picture at `url` as image output, or `None` when it cannot be
 /// fetched or is not an image. The link stays in the reply either way.
+///
+/// A redirect is not followed: only `url` itself was checked against
+/// the provider's origin. A body over the answer cap is dropped rather
+/// than cut short.
 fn fetch_image(cancel: &CancelFlag, url: &str) -> Option<ProviderEvent> {
     use base64::Engine as _;
 
@@ -953,19 +957,17 @@ fn fetch_image(cancel: &CancelFlag, url: &str) -> Option<ProviderEvent> {
         cancel,
         url.to_owned(),
         std::time::Duration::from_secs(60),
-        |agent, url| agent.get(url).call(),
+        |agent, url| agent.get(url).config().max_redirects(0).build().call(),
     )
     .ok()?;
     if !response.status().is_success() {
         return None;
     }
-    let mut bytes = Vec::new();
-    response
-        .into_body()
-        .into_reader()
-        .take(crate::images::MAX_RESPONSE_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    let bytes = crate::images::read_capped(
+        response.into_body().into_reader(),
+        crate::images::MAX_RESPONSE_BYTES,
+    )
+    .ok()?;
     let mime = kage_core::image::sniff_mime(&bytes)?;
     Some(ProviderEvent::Media {
         kind: kage_core::Modality::Image,
@@ -1174,6 +1176,90 @@ mod tests {
                 .any(|e| matches!(e, ProviderEvent::Media { .. }))
         );
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Stream a same-origin image link whose server answers once.
+    fn linked_picture_events(status: &str, headers: &str, body: Vec<u8>) -> Vec<ProviderEvent> {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let head = format!(
+            "HTTP/1.1 {status}\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            crate::testing::read_request(&mut conn);
+            conn.write_all(head.as_bytes()).unwrap();
+            let _ = conn.write_all(&body);
+        });
+        let text = format!("![image]({origin}/picture.png)");
+        let chunk = serde_json::json!({ "choices": [{ "delta": { "content": text } }] });
+        let sse = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+        let stream = OpenAiStream::new(
+            Box::new(std::io::Cursor::new(sse.into_bytes())),
+            CancelFlag::new(),
+        );
+        let events = collect_ok(stream.fetching_linked_images(origin));
+        server.join().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event, ProviderEvent::TextDelta { delta } if delta == &text
+        )));
+        events
+    }
+
+    #[test]
+    fn a_linked_picture_redirect_is_not_followed() {
+        use std::io::Write as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let location = format!(
+            "location: http://{}/private.png\r\n",
+            target.local_addr().unwrap()
+        );
+        let done = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&done);
+        let server = std::thread::spawn(move || {
+            loop {
+                match target.accept() {
+                    Ok((mut conn, _)) => {
+                        crate::testing::read_request(&mut conn);
+                        conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\n\x89PNG\r\n\x1a\n").unwrap();
+                        return true;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stop.load(Ordering::SeqCst) {
+                            return false;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            }
+        });
+        let events = linked_picture_events("302 Found", &location, Vec::new());
+        done.store(true, Ordering::SeqCst);
+        assert!(!server.join().unwrap(), "the redirect target was contacted");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Media { .. }))
+        );
+    }
+
+    #[test]
+    fn a_linked_picture_over_the_cap_is_refused() {
+        let mut body = vec![0; usize::try_from(crate::images::MAX_RESPONSE_BYTES + 1).unwrap()];
+        body[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let events = linked_picture_events("200 OK", "content-type: image/png\r\n", body);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Media { .. }))
+        );
     }
 
     #[test]

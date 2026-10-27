@@ -224,7 +224,7 @@ fn over_time(error: ProviderError, deadline: Instant, timeout: Duration) -> Prov
 }
 
 /// Read all of `reader`, refusing a body longer than `cap`.
-fn read_capped(reader: impl std::io::Read, cap: u64) -> Result<Vec<u8>, ProviderError> {
+pub(crate) fn read_capped(reader: impl std::io::Read, cap: u64) -> Result<Vec<u8>, ProviderError> {
     let mut body = Vec::new();
     reader
         .take(cap + 1)
