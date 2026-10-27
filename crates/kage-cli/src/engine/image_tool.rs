@@ -10,6 +10,7 @@
 //! save it there at once.
 
 use std::fmt::Write as _;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -43,6 +44,9 @@ pub(crate) struct GenerateImageTool {
     endpoint: MediaEndpoint,
     model: String,
     timeout: Duration,
+    /// Whether the answer is still asked for as base64. Cleared for the
+    /// rest of the session once a server refuses the field.
+    ask_base64: AtomicBool,
 }
 
 impl GenerateImageTool {
@@ -62,6 +66,7 @@ impl GenerateImageTool {
             endpoint,
             model,
             timeout,
+            ask_base64: AtomicBool::new(true),
         })
     }
 }
@@ -154,8 +159,13 @@ impl Tool for GenerateImageTool {
             prompt: prompt.to_owned(),
             size,
         };
-        let image = match images::generate(&self.endpoint, &request, self.timeout, cx.cancel_flag())
-        {
+        let image = match images::generate(
+            &self.endpoint,
+            &request,
+            self.timeout,
+            cx.cancel_flag(),
+            &self.ask_base64,
+        ) {
             Ok(image) => image,
             Err(MediaError {
                 error: ProviderError::Cancelled,
@@ -296,6 +306,7 @@ mod tests {
             },
             model: "image".to_owned(),
             timeout: Duration::from_secs(10),
+            ask_base64: AtomicBool::new(true),
         }
     }
 

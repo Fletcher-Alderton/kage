@@ -71,6 +71,11 @@ pub struct ImageEdit {
 
 /// Generate one image, waiting at most `timeout` for the whole call.
 ///
+/// When `ask_base64` is set the answer is asked for as base64; a
+/// refusal naming that field stores `false` in it and the request is
+/// asked once more without it, within the same deadline, so the field
+/// stays off for later calls.
+///
 /// Setting `cancel` ends the call at once, closing its connection.
 ///
 /// # Errors
@@ -90,15 +95,20 @@ pub fn generate(
     request: &ImageRequest,
     timeout: Duration,
     cancel: &CancelFlag,
+    ask_base64: &AtomicBool,
 ) -> Result<GeneratedImage, MediaError> {
     let deadline = Instant::now() + timeout;
-    let mut result = post(endpoint, request, deadline, timeout, cancel, true);
+    let ask = ask_base64.load(Ordering::Relaxed);
+    let mut result = post(endpoint, request, deadline, timeout, cancel, ask);
     // A 400 is answered before any image is made, so asking again costs
-    // a round trip and no generation. The retry shares the deadline.
-    if result
-        .as_ref()
-        .is_err_and(|error| names_field(error, "response_format"))
+    // a round trip and no generation. The retry shares the deadline,
+    // and the refusal is remembered for later calls.
+    if ask
+        && result
+            .as_ref()
+            .is_err_and(|error| names_field(error, "response_format"))
     {
+        ask_base64.store(false, Ordering::Relaxed);
         result = post(endpoint, request, deadline, timeout, cancel, false);
     }
     result.map_err(|refused| MediaError {
@@ -367,6 +377,7 @@ mod tests {
             &request(),
             Duration::from_secs(10),
             &CancelFlag::new(),
+            &AtomicBool::new(true),
         );
         (result, server.join().unwrap())
     }
@@ -430,6 +441,7 @@ mod tests {
             &request,
             Duration::from_secs(10),
             &CancelFlag::new(),
+            &AtomicBool::new(true),
         )
         .unwrap();
         assert_eq!(image.revised_prompt, None);
@@ -580,18 +592,37 @@ mod tests {
                 ),
             ],
         );
+        let flag = AtomicBool::new(true);
         let image = generate(
             &endpoint(format!("http://{addr}/v1")),
             &request(),
             Duration::from_secs(10),
             &CancelFlag::new(),
+            &flag,
         )
         .unwrap();
         assert_eq!(image.bytes, PNG);
+        assert!(!flag.load(Ordering::Relaxed));
         let requests = server.join().unwrap();
         assert_eq!(sent_body(&requests[0])["response_format"], "b64_json");
         assert!(sent_body(&requests[1]).get("response_format").is_none());
         assert_eq!(sent_body(&requests[1])["model"], "image:max");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!(r#"{{"data":[{{"b64_json":"{}"}}]}}"#, png_base64());
+        let server = serve_each(listener, vec![("200 OK", body)]);
+        generate(
+            &endpoint(format!("http://{addr}/v1")),
+            &request(),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &flag,
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(sent_body(&requests[0]).get("response_format").is_none());
     }
 
     #[test]
@@ -610,6 +641,7 @@ mod tests {
             &request(),
             Duration::from_secs(10),
             &CancelFlag::new(),
+            &AtomicBool::new(true),
         )
         .unwrap_err();
         assert!(
@@ -647,6 +679,7 @@ mod tests {
             &request(),
             Duration::from_secs(30),
             &cancel,
+            &AtomicBool::new(true),
         )
         .unwrap_err();
         assert!(matches!(err.error, ProviderError::Cancelled), "{err:?}");
@@ -661,6 +694,7 @@ mod tests {
             &request(),
             Duration::from_secs(1),
             &CancelFlag::new(),
+            &AtomicBool::new(true),
         )
         .unwrap_err();
         assert!(
@@ -696,6 +730,7 @@ mod tests {
             &request(),
             Duration::from_secs(30),
             &cancel,
+            &AtomicBool::new(true),
         )
         .unwrap_err();
         assert!(matches!(err.error, ProviderError::Cancelled), "{err:?}");
@@ -722,6 +757,7 @@ mod tests {
             &request(),
             Duration::from_secs(1),
             &CancelFlag::new(),
+            &AtomicBool::new(true),
         )
         .unwrap_err();
         assert!(
