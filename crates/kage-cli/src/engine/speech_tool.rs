@@ -8,6 +8,7 @@
 //! A clip is therefore always saved in the workspace, under
 //! `generated/` when the call names no `path`.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -19,7 +20,7 @@ use kage_provider::speech::{self, SpeechRequest};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde::Deserialize;
 
-use super::media_tool::{self, failure, matching_extension, workspace_path};
+use super::media_tool::{self, failure, workspace_path};
 use crate::auth::AuthStore;
 
 /// The tool's name, as the model calls it and permission rules name it.
@@ -189,29 +190,33 @@ impl Tool for GenerateSpeechTool {
                 ));
             }
         };
-        // The directory may only now exist; resolve again so a link
-        // planted there is caught before writing.
-        let target = match given_path {
-            Some(path) => workspace_path(cx.workdir(), path)?,
-            None => workspace_path(cx.workdir(), &super::images::generated_name(clip.mime))?,
-        };
-        let path = matching_extension(target, clip.mime);
-        let saved = super::images::save(cx.workdir(), Some(&path), clip.mime, &clip.bytes)
-            .map_err(ToolError::Other)?;
-        let shown = media_tool::shown_path(cx.workdir(), &saved);
+        // A failed save keeps the clip in this result: it was made and
+        // paid for, and this result is the only other copy.
+        let target =
+            given_path.map_or_else(|| super::images::generated_name(clip.mime), str::to_owned);
+        let saved = media_tool::save_in_workspace(cx.workdir(), &target, clip.mime, &clip.bytes);
+        let mut text = format!(
+            "Read {count} characters aloud ({}, {}). The clip plays where the client plays \
+             audio; it is not kept in the session.",
+            clip.mime,
+            kage_core::image::human_bytes(clip.bytes.len()),
+        );
+        match &saved {
+            Ok(saved) => {
+                let shown = media_tool::shown_path(cx.workdir(), saved);
+                let _ = write!(text, " Saved as {}.", shown.display());
+            }
+            Err(why) => {
+                let _ = write!(text, " It was not saved: {why}.");
+            }
+        }
         Ok(ToolOutput {
             is_error: false,
-            text: format!(
-                "Read {count} characters aloud ({}, {}). The clip plays where the client \
-                 plays audio; it is not kept in the session. Saved as {}.",
-                clip.mime,
-                kage_core::image::human_bytes(clip.bytes.len()),
-                shown.display(),
-            ),
+            text,
             structured: Some(serde_json::json!({
                 "model": self.model,
                 "voice": request.voice,
-                "path": saved.display().to_string(),
+                "path": saved.as_ref().ok().map(|path| path.display().to_string()),
             })),
             terminate: false,
             media: vec![ToolMedia {
@@ -478,6 +483,28 @@ mod tests {
         assert_eq!(seen.count(), 0, "no request is made for a refused call");
         let beside = workdir.path().with_extension("mp3");
         assert!(!beside.exists(), "{} was written", beside.display());
+    }
+
+    #[test]
+    fn a_clip_that_cannot_be_saved_still_rides_the_result() {
+        let (url, seen) = speech_server();
+        let workdir = tempfile::tempdir().unwrap();
+        std::fs::write(workdir.path().join("generated"), b"a file, not a directory").unwrap();
+        let cancel = CancelFlag::new();
+        let cx = ToolContext::new(workdir.path(), &cancel);
+        let output = tool(&url)
+            .execute(serde_json::json!({ "text": "hello" }), &cx)
+            .unwrap();
+        assert!(!output.is_error);
+        assert_eq!(output.media.len(), 1);
+        assert_eq!(output.media[0].mime, "audio/mpeg");
+        assert!(
+            output.text.contains("It was not saved: "),
+            "{}",
+            output.text
+        );
+        assert!(output.structured.unwrap()["path"].is_null());
+        assert_eq!(seen.count(), 1);
     }
 
     #[cfg(unix)]

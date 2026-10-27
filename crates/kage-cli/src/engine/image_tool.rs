@@ -22,7 +22,7 @@ use kage_provider::media::{MediaEndpoint, MediaError};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde::Deserialize;
 
-use super::media_tool::{self, failure, is_size, matching_extension, workspace_path};
+use super::media_tool::{self, failure, is_size, workspace_path};
 use crate::auth::AuthStore;
 
 /// The tool's name, as the model calls it and permission rules name it.
@@ -180,26 +180,25 @@ impl Tool for GenerateImageTool {
                 ));
             }
         };
-        let saved = match path {
-            Some(path) => {
-                // The directory may only now exist; resolve again so a
-                // link planted there is caught before writing.
-                let path = matching_extension(workspace_path(cx.workdir(), path)?, image.mime);
-                let saved =
-                    super::images::save(cx.workdir(), Some(&path), image.mime, &image.bytes)
-                        .map_err(ToolError::Other)?;
-                Some(saved)
-            }
-            None => None,
-        };
+        // A failed save keeps the image: it was made and paid for, and
+        // it stays in the session for `/image save`.
+        let saved = path.map(|path| {
+            media_tool::save_in_workspace(cx.workdir(), path, image.mime, &image.bytes)
+        });
         let mut text = format!(
             "Generated an image ({}, {}). It comes with this result, and the user sees it.",
             image.mime,
             kage_core::image::human_bytes(image.bytes.len())
         );
-        if let Some(saved) = &saved {
-            let shown = media_tool::shown_path(cx.workdir(), saved);
-            let _ = write!(text, " Saved as {}.", shown.display());
+        match &saved {
+            Some(Ok(saved)) => {
+                let shown = media_tool::shown_path(cx.workdir(), saved);
+                let _ = write!(text, " Saved as {}.", shown.display());
+            }
+            Some(Err(why)) => {
+                let _ = write!(text, " It was not saved: {why}.");
+            }
+            None => {}
         }
         if let Some(note) = &image.revised_prompt {
             let _ = write!(text, "\nServer note: {note}");
@@ -210,7 +209,10 @@ impl Tool for GenerateImageTool {
             structured: Some(serde_json::json!({
                 "model": self.model,
                 "note": image.revised_prompt,
-                "path": saved.as_ref().map(|path| path.display().to_string()),
+                "path": saved
+                    .as_ref()
+                    .and_then(|saved| saved.as_ref().ok())
+                    .map(|path| path.display().to_string()),
             })),
             terminate: false,
             media: vec![ToolMedia {
@@ -364,6 +366,30 @@ mod tests {
             output.text
         );
         assert!(!workdir.path().join("art/bird.jpg").exists());
+    }
+
+    #[test]
+    fn an_image_that_cannot_be_saved_still_rides_the_result() {
+        let (url, hits) = image_server();
+        let workdir = tempfile::tempdir().unwrap();
+        std::fs::write(workdir.path().join("art"), b"a file, not a directory").unwrap();
+        let cancel = CancelFlag::new();
+        let cx = ToolContext::new(workdir.path(), &cancel);
+        let output = tool(&url)
+            .execute(
+                serde_json::json!({ "prompt": "a kite", "path": "art/kite.png" }),
+                &cx,
+            )
+            .unwrap();
+        assert!(!output.is_error);
+        assert_eq!(output.media.len(), 1);
+        assert!(
+            output.text.contains("It was not saved: "),
+            "{}",
+            output.text
+        );
+        assert!(output.structured.unwrap()["path"].is_null());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

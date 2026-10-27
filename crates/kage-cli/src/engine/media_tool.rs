@@ -249,6 +249,40 @@ pub(super) fn matching_extension(path: PathBuf, mime: &str) -> PathBuf {
     }
 }
 
+/// Saves `bytes` of type `mime` at `path` in the workspace, never
+/// replacing a file, and returns where it went. The path is resolved
+/// again here, and once more after its directories are made, so a link
+/// planted in a directory that only now exists is caught before
+/// writing.
+///
+/// # Errors
+///
+/// Why the file was not saved, ready to follow "It was not saved: ".
+pub(super) fn save_in_workspace(
+    workdir: &Path,
+    path: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let target = matching_extension(
+        workspace_path(workdir, path).map_err(|error| error.to_string())?,
+        mime,
+    );
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let root = workdir
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", workdir.display()))?;
+        let real = dir
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+        if !real.starts_with(&root) {
+            return Err(format!("{} leaves the workspace", dir.display()));
+        }
+    }
+    super::images::save(workdir, Some(&target), mime, bytes)
+}
+
 /// Whether `size` reads `WIDTHxHEIGHT` with whole numbers.
 pub(super) fn is_size(size: &str) -> bool {
     size.split_once('x').is_some_and(|(w, h)| {

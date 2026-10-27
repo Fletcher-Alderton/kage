@@ -391,7 +391,8 @@ session. Editors over ACP get an `audio` block, the TUI shows a
 `[audio/mpeg from the tool, <size>]` row, and the desktop shows the
 result text. Because the clip is not kept, the tool always saves it,
 under `generated/` unless the call names a `path`, and it never
-replaces an existing file.
+replaces an existing file. When the file cannot be written, the clip
+still comes with the call and the result says why.
 
 The server's limits on text length and voices are its own. When it
 refuses a call, its message reaches the model as written.

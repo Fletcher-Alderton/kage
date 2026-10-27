@@ -26,7 +26,7 @@ use kage_provider::media::{MediaEndpoint, MediaError};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde::Deserialize;
 
-use super::media_tool::{self, failure, is_size, matching_extension, workspace_path};
+use super::media_tool::{self, failure, is_size, workspace_path};
 use crate::auth::AuthStore;
 
 /// The tool's name, as the model calls it and permission rules name it.
@@ -142,37 +142,39 @@ impl EditImageTool {
     }
 
     /// Saves the edited image when `path` is given, and builds the
-    /// result text: what was edited, where it was saved, and the
-    /// server's note.
+    /// result text: what was edited, where it was saved or why not, and
+    /// the server's note. A failed save keeps the image: it was made and
+    /// paid for, and it stays in the session for `/image save`.
     fn text_and_saved(
         cx: &ToolContext<'_>,
         path: Option<&str>,
         image: &GeneratedImage,
         source: &str,
-    ) -> Result<(String, Option<PathBuf>), ToolError> {
-        let saved = match path {
-            Some(path) => {
-                let path = matching_extension(workspace_path(cx.workdir(), path)?, image.mime);
-                let saved =
-                    super::images::save(cx.workdir(), Some(&path), image.mime, &image.bytes)
-                        .map_err(ToolError::Other)?;
-                Some(saved)
-            }
-            None => None,
-        };
+    ) -> (String, Option<PathBuf>) {
+        let saved = path.map(|path| {
+            media_tool::save_in_workspace(cx.workdir(), path, image.mime, &image.bytes)
+        });
         let mut text = format!(
             "Edited {source} ({}, {}). It comes with this result, and the user sees it.",
             image.mime,
             kage_core::image::human_bytes(image.bytes.len())
         );
-        if let Some(saved) = &saved {
-            let shown = media_tool::shown_path(cx.workdir(), saved);
-            let _ = write!(text, " Saved as {}.", shown.display());
-        }
+        let saved = match saved {
+            Some(Ok(saved)) => {
+                let shown = media_tool::shown_path(cx.workdir(), &saved);
+                let _ = write!(text, " Saved as {}.", shown.display());
+                Some(saved)
+            }
+            Some(Err(why)) => {
+                let _ = write!(text, " It was not saved: {why}.");
+                None
+            }
+            None => None,
+        };
         if let Some(note) = &image.revised_prompt {
             let _ = write!(text, "\nServer note: {note}");
         }
-        Ok((text, saved))
+        (text, saved)
     }
 }
 
@@ -309,7 +311,7 @@ impl Tool for EditImageTool {
                 ));
             }
         };
-        let (text, saved) = Self::text_and_saved(cx, path, &image, source)?;
+        let (text, saved) = Self::text_and_saved(cx, path, &image, source);
         Ok(ToolOutput {
             is_error: false,
             text,
