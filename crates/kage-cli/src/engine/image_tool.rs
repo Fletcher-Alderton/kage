@@ -10,61 +10,22 @@
 //! save it there at once.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use kage_core::config::{Config, CustomProviderKind, GenerateImageConfig};
+use kage_core::config::Config;
 use kage_core::{Risk, ToolMedia, ToolOutput, ToolUpdate};
 use kage_provider::ProviderError;
-use kage_provider::compat::{COMPAT_PROVIDERS, CompatKind};
 use kage_provider::images::{self, ImageRequest};
 use kage_provider::media::{MediaEndpoint, MediaError};
-use kage_tools::{ExecMode, Tool, ToolContext, ToolError, ToolRegistry};
+use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde::Deserialize;
 
-use crate::auth::{self, AuthStore};
+use super::media_tool::{self, failure, is_size, matching_extension, workspace_path};
+use crate::auth::AuthStore;
 
 /// The tool's name, as the model calls it and permission rules name it.
 pub(crate) const GENERATE_IMAGE_TOOL: &str = "generate_image";
-
-/// How long one generation may take when the config says nothing.
-/// Image servers commonly answer in 10 to 40 seconds, and some give up
-/// on their own deadline (150 seconds on one) before answering 503, so
-/// the client waits past that to hear the server's answer.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
-
-/// The longest `timeout_secs` accepted: an hour, past any image
-/// server's own deadline.
-const MAX_TIMEOUT_SECS: u64 = 3600;
-
-/// Registers `generate_image` when `[tools.generate_image]` resolves.
-pub(crate) trait WithImageGeneration {
-    /// `self` with `generate_image` registered when `config`'s
-    /// `[tools.generate_image]` resolves to an endpoint and a model.
-    /// An unset table changes nothing. One that does not resolve is
-    /// reported on stderr and leaves the tool out, so a broken table
-    /// costs one tool rather than the session.
-    #[must_use]
-    fn with_image_generation(self, config: &Config) -> Self;
-}
-
-impl WithImageGeneration for ToolRegistry {
-    fn with_image_generation(mut self, config: &Config) -> Self {
-        if config.tools.generate_image.is_default() {
-            return self;
-        }
-        let store = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
-        match GenerateImageTool::from_config(config, &store) {
-            Ok(tool) => self.register(Arc::new(tool)),
-            Err(reason) => {
-                eprintln!("kage: [tools.generate_image] {reason}; {GENERATE_IMAGE_TOOL} is off");
-            }
-        }
-        self
-    }
-}
 
 /// Input shape for the `generate_image` tool.
 #[derive(Debug, Deserialize)]
@@ -92,132 +53,17 @@ impl GenerateImageTool {
     ///
     /// Why the table does not describe a usable tool, ready to follow
     /// `[tools.generate_image]` in a message.
-    fn from_config(config: &Config, store: &AuthStore) -> Result<Self, String> {
+    pub(super) fn from_config(config: &Config, store: &AuthStore) -> Result<Self, String> {
         let cfg = &config.tools.generate_image;
-        let endpoint = endpoint(cfg, config, store)?;
-        let model = cfg
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .ok_or("names no `model`")?
-            .to_owned();
-        let timeout = match cfg.timeout_secs {
-            None => DEFAULT_TIMEOUT,
-            Some(secs @ 1..=MAX_TIMEOUT_SECS) => Duration::from_secs(secs),
-            Some(_) => {
-                return Err(format!("timeout_secs must be from 1 to {MAX_TIMEOUT_SECS}"));
-            }
-        };
+        let endpoint = media_tool::endpoint(GENERATE_IMAGE_TOOL, cfg, config, store)?;
+        let model = media_tool::model(cfg)?;
+        let timeout = media_tool::timeout(cfg)?;
         Ok(Self {
             endpoint,
             model,
             timeout,
         })
     }
-}
-
-/// The endpoint `cfg` names: its own `base_url`, with `headers` and the
-/// key in `api_key_env` or saved under the tool's name, or else the
-/// base URL, key and headers kage reaches `provider` with.
-fn endpoint(
-    cfg: &GenerateImageConfig,
-    config: &Config,
-    store: &AuthStore,
-) -> Result<MediaEndpoint, String> {
-    if let Some(base_url) = cfg.base_url.as_deref().filter(|url| !url.trim().is_empty()) {
-        let api_key = match cfg.api_key_env.as_deref().filter(|env| !env.is_empty()) {
-            None => store
-                .access_token(GENERATE_IMAGE_TOOL)
-                .unwrap_or_default()
-                .to_owned(),
-            Some(env) => crate::providers::lookup_key_with_env(GENERATE_IMAGE_TOOL, env, store)
-                .ok_or_else(|| {
-                    format!(
-                        "names api_key_env = \"{env}\", which is not set, and no key is saved \
-                         with `kage auth login {GENERATE_IMAGE_TOOL}`"
-                    )
-                })?,
-        };
-        return Ok(MediaEndpoint {
-            base_url: base_url.to_owned(),
-            api_key,
-            headers: cfg.headers.clone(),
-        });
-    }
-    match cfg.provider.as_deref().filter(|id| !id.is_empty()) {
-        Some(id) => provider_endpoint(id, config, store),
-        None => Err("names neither `base_url` nor `provider`".to_owned()),
-    }
-}
-
-/// The base URL, key and headers kage reaches provider `id` with, for a
-/// provider that speaks the `OpenAI` API: a custom provider of kind
-/// `openai`, `openai` itself, or an OpenAI-compatible catalog provider.
-/// kage's `anthropic` and `google` providers speak other APIs, so they
-/// cannot lend the tool their endpoint.
-fn provider_endpoint(
-    id: &str,
-    config: &Config,
-    store: &AuthStore,
-) -> Result<MediaEndpoint, String> {
-    let no_key = |env: &str| {
-        if env.is_empty() {
-            format!("provider `{id}` has no saved key")
-        } else {
-            format!("provider `{id}` has no key: {env} is not set and no key is saved")
-        }
-    };
-    if let Some(custom) = config.providers.custom.get(id) {
-        if custom.kind != CustomProviderKind::OpenAi {
-            return Err(format!(
-                "provider `{id}` is not of kind openai, the only kind the tool can call"
-            ));
-        }
-        let env = custom.key_env(id);
-        let api_key = if env.is_empty() {
-            String::new()
-        } else {
-            crate::providers::lookup_key_with_env(id, &env, store).ok_or_else(|| no_key(&env))?
-        };
-        return Ok(MediaEndpoint {
-            base_url: custom.base_url.clone(),
-            api_key,
-            headers: custom.headers.clone(),
-        });
-    }
-    let default_base = if id == "openai" {
-        kage_provider::openai::DEFAULT_BASE_URL
-    } else {
-        match COMPAT_PROVIDERS.iter().find(|entry| entry.id == id) {
-            Some(entry) if entry.kind == CompatKind::OpenAi => entry.base_url,
-            Some(_) => {
-                return Err(format!(
-                    "provider `{id}` speaks the Anthropic API, which has no images endpoint"
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "provider `{id}` cannot serve images: the tool calls the OpenAI Images \
-                     API, which kage reaches through `openai`, an OpenAI-compatible \
-                     provider, or a [providers.custom.<id>] of kind openai"
-                ));
-            }
-        }
-    };
-    let ov = config.providers.overrides.get(id);
-    let env = ov
-        .and_then(|o| o.api_key_env.as_deref())
-        .unwrap_or_else(|| auth::env_var_for(id));
-    let api_key =
-        crate::providers::lookup_key_with_env(id, env, store).ok_or_else(|| no_key(env))?;
-    Ok(MediaEndpoint {
-        base_url: ov
-            .and_then(|o| o.base_url.clone())
-            .unwrap_or_else(|| default_base.to_owned()),
-        api_key,
-        headers: ov.map(|o| o.headers.clone()).unwrap_or_default(),
-    })
 }
 
 impl Tool for GenerateImageTool {
@@ -335,14 +181,7 @@ impl Tool for GenerateImageTool {
             kage_core::image::human_bytes(image.bytes.len())
         );
         if let Some(saved) = &saved {
-            // The save went through the resolved workspace path, which
-            // may differ from the workdir as given (`/private/var` on
-            // macOS, `\\?\` on Windows).
-            let root = cx
-                .workdir()
-                .canonicalize()
-                .unwrap_or_else(|_| cx.workdir().to_owned());
-            let shown = saved.strip_prefix(&root).unwrap_or(saved);
+            let shown = media_tool::shown_path(cx.workdir(), saved);
             let _ = write!(text, " Saved as {}.", shown.display());
         }
         if let Some(note) = &image.revised_prompt {
@@ -365,106 +204,15 @@ impl Tool for GenerateImageTool {
     }
 }
 
-/// `path` as an absolute path inside `workdir`, refusing one that leaves
-/// it: through `..`, a root, a drive, a `:` (a Windows stream or drive),
-/// or a symlink.
-fn workspace_path(workdir: &Path, path: &str) -> Result<PathBuf, ToolError> {
-    let refuse = |reason: &str| ToolError::Path {
-        path: PathBuf::from(path),
-        reason: reason.to_owned(),
-    };
-    if path.contains(':') || Path::new(path).is_absolute() {
-        return Err(refuse("must be a path inside the workspace"));
-    }
-    if Path::new(path)
-        .components()
-        .any(|part| matches!(part, std::path::Component::ParentDir))
-    {
-        return Err(refuse("must not leave the workspace"));
-    }
-    kage_tools::resolve_under(workdir, Path::new(path))
-}
-
-/// `path` with an extension naming `mime`'s type. One that already
-/// does (`jpg` and `jpeg` alike, in any case) is kept, and so is any
-/// path when the type has no known extension.
-fn matching_extension(path: PathBuf, mime: &str) -> PathBuf {
-    let Some(want) = kage_core::image::extension_for(mime) else {
-        return path;
-    };
-    let has = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase);
-    let same = has
-        .as_deref()
-        .is_some_and(|ext| ext == want || want == "jpg" && ext == "jpeg");
-    if same {
-        path
-    } else {
-        path.with_extension(want)
-    }
-}
-
-/// Whether `size` reads `WIDTHxHEIGHT` with whole numbers.
-fn is_size(size: &str) -> bool {
-    size.split_once('x').is_some_and(|(w, h)| {
-        !w.is_empty()
-            && !h.is_empty()
-            && w.bytes().all(|b| b.is_ascii_digit())
-            && h.bytes().all(|b| b.is_ascii_digit())
-    })
-}
-
-/// A failed generation, said so the model knows whether to try again.
-fn failure(error: &MediaError) -> ToolOutput {
-    let cause = match &error.error {
-        ProviderError::Http { status, body } if body.is_empty() => {
-            format!("the server answered {status}")
-        }
-        ProviderError::Http { status, body } => format!("the server answered {status}: {body}"),
-        ProviderError::RateLimited { body, .. } => format!(
-            "the server is rate limiting: {}",
-            body.as_deref().unwrap_or("too many requests")
-        ),
-        ProviderError::Auth(detail) => format!("the server refused the key: {detail}"),
-        ProviderError::Transport(detail) | ProviderError::Decode(detail) => detail.clone(),
-        other => other.to_string(),
-    };
-    // A server's message often ends in a period of its own.
-    let cause = cause.trim_end();
-    let cause = cause.strip_suffix('.').unwrap_or(cause);
-    let advice = if error.error.is_transient() {
-        match error.retry_after {
-            Some(wait) => format!(
-                "A retry may succeed; the server asks to wait {}s first.",
-                wait.as_secs().max(1)
-            ),
-            None => "A retry may succeed.".to_owned(),
-        }
-    } else if matches!(error.error, ProviderError::Auth(_)) {
-        "Retrying will fail the same way: the key needs fixing, so tell the user.".to_owned()
-    } else {
-        "Retrying the same request will fail the same way; change the prompt or size \
-         first, or tell the user."
-            .to_owned()
-    };
-    ToolOutput {
-        is_error: true,
-        text: format!("Image generation failed: {cause}.\n{advice}"),
-        structured: None,
-        terminate: false,
-        media: Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::media_tool::DEFAULT_TIMEOUT;
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
+    use std::path::Path;
 
     use kage_core::CancelFlag;
-    use kage_core::config::GenerateImageConfig;
+    use kage_core::config::MediaToolConfig;
 
     use super::*;
 
@@ -544,7 +292,7 @@ mod tests {
         }
     }
 
-    fn config(cfg: GenerateImageConfig) -> Config {
+    fn config(cfg: MediaToolConfig) -> Config {
         let mut config = Config::default();
         config.tools.generate_image = cfg;
         config
@@ -601,16 +349,6 @@ mod tests {
     }
 
     #[test]
-    fn the_extension_follows_the_image_type() {
-        let ext = |path: &str, mime| matching_extension(PathBuf::from(path), mime);
-        assert_eq!(ext("a/x.png", "image/jpeg"), PathBuf::from("a/x.jpg"));
-        assert_eq!(ext("x.jpeg", "image/jpeg"), PathBuf::from("x.jpeg"));
-        assert_eq!(ext("x.JPG", "image/jpeg"), PathBuf::from("x.JPG"));
-        assert_eq!(ext("x", "image/webp"), PathBuf::from("x.webp"));
-        assert_eq!(ext("x.bmp", "image/bmp"), PathBuf::from("x.bmp"));
-    }
-
-    #[test]
     fn a_path_outside_the_workspace_costs_no_generation() {
         let (url, hits) = image_server();
         let workdir = tempfile::tempdir().unwrap();
@@ -647,45 +385,45 @@ mod tests {
         let store = AuthStore::empty();
         let from = |cfg| GenerateImageTool::from_config(&config(cfg), &store);
 
-        let named = from(GenerateImageConfig {
+        let named = from(MediaToolConfig {
             base_url: Some("https://images.example/v1".into()),
             model: Some("image".into()),
-            ..GenerateImageConfig::default()
+            ..MediaToolConfig::default()
         })
         .unwrap();
         assert_eq!(named.endpoint.base_url, "https://images.example/v1");
         assert!(named.endpoint.api_key.is_empty());
         assert_eq!(named.timeout, DEFAULT_TIMEOUT);
 
-        let cases: [(GenerateImageConfig, &str); 4] = [
+        let cases: [(MediaToolConfig, &str); 4] = [
             (
-                GenerateImageConfig {
+                MediaToolConfig {
                     base_url: Some("https://images.example/v1".into()),
-                    ..GenerateImageConfig::default()
+                    ..MediaToolConfig::default()
                 },
                 "names no `model`",
             ),
             (
-                GenerateImageConfig {
+                MediaToolConfig {
                     model: Some("image".into()),
-                    ..GenerateImageConfig::default()
+                    ..MediaToolConfig::default()
                 },
                 "names neither",
             ),
             (
-                GenerateImageConfig {
+                MediaToolConfig {
                     provider: Some("anthropic".into()),
                     model: Some("image".into()),
-                    ..GenerateImageConfig::default()
+                    ..MediaToolConfig::default()
                 },
-                "cannot serve images",
+                "cannot serve this tool: it calls an OpenAI API",
             ),
             (
-                GenerateImageConfig {
+                MediaToolConfig {
                     base_url: Some("https://images.example/v1".into()),
                     model: Some("image".into()),
                     timeout_secs: Some(0),
-                    ..GenerateImageConfig::default()
+                    ..MediaToolConfig::default()
                 },
                 "timeout_secs",
             ),
@@ -697,11 +435,11 @@ mod tests {
 
         let mut saved = AuthStore::empty();
         saved.set_api_key(GENERATE_IMAGE_TOOL, "sk-saved");
-        let unset_env = || GenerateImageConfig {
+        let unset_env = || MediaToolConfig {
             base_url: Some("https://images.example/v1".into()),
             api_key_env: Some("KAGE_TEST_IMAGE_KEY_NEVER_SET".into()),
             model: Some("image".into()),
-            ..GenerateImageConfig::default()
+            ..MediaToolConfig::default()
         };
         let keyed = GenerateImageTool::from_config(&config(unset_env()), &saved).unwrap();
         assert_eq!(keyed.endpoint.api_key, "sk-saved", "the saved key fills in");
@@ -716,11 +454,5 @@ mod tests {
         .unwrap();
         let err = GenerateImageTool::from_config(&custom, &store).unwrap_err();
         assert!(err.contains("not of kind openai"), "{err}");
-    }
-
-    #[test]
-    fn an_unset_table_registers_nothing() {
-        let tools = kage_tools::builtin_registry().with_image_generation(&Config::default());
-        assert!(tools.get(GENERATE_IMAGE_TOOL).is_none());
     }
 }

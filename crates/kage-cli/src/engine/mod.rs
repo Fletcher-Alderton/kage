@@ -16,6 +16,7 @@ mod image_tool;
 mod images;
 mod mailbox_tool;
 mod mcp;
+mod media_tool;
 mod plan_tool;
 mod plugin_tools;
 mod question_tool;
@@ -55,7 +56,7 @@ use kage_tools::ToolRegistry;
 use self::swarm_tool::SwarmInfo;
 
 pub(crate) use bus::{Subscriber, SubscriptionId};
-pub(crate) use image_tool::{GENERATE_IMAGE_TOOL, WithImageGeneration};
+pub(crate) use media_tool::WithMediaTools;
 pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
 
@@ -72,6 +73,9 @@ use shell::ShellDone;
 use swarm_tool::{SWARM_TOOL, SwarmTool};
 
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
+
+/// Media tools whose endpoint credentials can be saved by name.
+pub(crate) const MEDIA_TOOLS: &[&str] = &[image_tool::GENERATE_IMAGE_TOOL];
 
 /// A session to host, with the resources its runs use.
 pub(crate) struct SessionSpec {

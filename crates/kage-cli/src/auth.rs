@@ -675,14 +675,14 @@ fn write_list<W: Write>(
 
 /// `true` when `target` names what `kage auth login` can store a
 /// credential for: a builtin or catalog id, a custom provider declared
-/// under `[providers.custom.*]`, or the `generate_image` tool's endpoint.
+/// under `[providers.custom.*]`, or a media tool endpoint.
 fn login_target_is_known(
     target: &str,
     custom: &BTreeMap<String, kage_core::config::CustomProviderConfig>,
 ) -> bool {
     KNOWN_PROVIDERS.contains(&target)
         || custom.contains_key(target)
-        || target == crate::engine::GENERATE_IMAGE_TOOL
+        || crate::engine::MEDIA_TOOLS.contains(&target)
 }
 
 fn select_provider(
@@ -696,7 +696,7 @@ fn select_provider(
         }
         let mut known: Vec<&str> = KNOWN_PROVIDERS.to_vec();
         known.extend(custom.keys().map(String::as_str));
-        known.push(crate::engine::GENERATE_IMAGE_TOOL);
+        known.extend(crate::engine::MEDIA_TOOLS);
         return Err(format!(
             "unknown provider '{p}', expected one of: {}",
             known.join(", ")

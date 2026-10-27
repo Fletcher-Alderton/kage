@@ -10,7 +10,7 @@ use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionWriter};
 
 use crate::cli_printing::{print_envelope_json, print_event};
-use crate::engine::WithImageGeneration as _;
+use crate::engine::WithMediaTools as _;
 use kage_core::agent_report::{AgentReport, ReportState};
 
 /// The layered config for `workdir`, refused when its permission rules
@@ -56,7 +56,7 @@ pub(crate) fn execute_print_run(
     let tools = tools
         .with_shell_config(&layered.shell)
         .with_web_search(&layered.tools.web_search)
-        .with_image_generation(&layered);
+        .with_media_tools(&layered);
     if layered.permissions.confine_paths {
         cx = cx.with_confine_paths();
     } else {
