@@ -231,6 +231,32 @@ pub(crate) fn fetch_link(
     .map_err(late)
 }
 
+/// The payload of a `data:` URI, given without its scheme. Only base64
+/// payloads are read; media is never sent percent-encoded. `noun` names
+/// what it holds in the error.
+pub(crate) fn decode_data_uri(uri: &str, noun: &str) -> Result<Vec<u8>, ProviderError> {
+    match uri.split_once(',') {
+        Some((meta, payload)) if meta.ends_with(";base64") => decode_base64(payload, noun),
+        _ => Err(ProviderError::Decode(format!(
+            "{noun} `data:` URI is not base64"
+        ))),
+    }
+}
+
+/// Standard base64, ignoring the line breaks some servers wrap it with.
+/// `noun` names what it holds in the error.
+pub(crate) fn decode_base64(encoded: &str, noun: &str) -> Result<Vec<u8>, ProviderError> {
+    use base64::Engine as _;
+
+    let compact: String = encoded
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(compact)
+        .map_err(|e| ProviderError::Decode(format!("{noun} is not valid base64: {e}")))
+}
+
 /// Read all of `reader`, refusing a body longer than `cap`.
 pub(crate) fn read_capped(
     reader: impl std::io::Read,

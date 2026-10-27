@@ -652,6 +652,7 @@ fn media_tool_keys(config: &kage_core::config::Config, store: &AuthStore) -> Vec
             crate::engine::GENERATE_SPEECH_TOOL,
             &tools.generate_speech.endpoint,
         ),
+        (crate::engine::GENERATE_MUSIC_TOOL, &tools.generate_music),
     ]
     .into_iter()
     .filter(|(_, cfg)| {

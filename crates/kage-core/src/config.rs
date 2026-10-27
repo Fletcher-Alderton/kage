@@ -87,6 +87,11 @@ pub struct ToolsConfig {
     /// registered.
     #[serde(default, skip_serializing_if = "SpeechToolConfig::is_default")]
     pub generate_speech: SpeechToolConfig,
+    /// The music endpoint the `generate_music` tool calls
+    /// (`[tools.generate_music]`). Without one the tool is not
+    /// registered.
+    #[serde(default, skip_serializing_if = "MediaToolConfig::is_default")]
+    pub generate_music: MediaToolConfig,
 }
 
 impl ToolsConfig {
@@ -98,6 +103,7 @@ impl ToolsConfig {
             && self.generate_image.is_default()
             && self.edit_image.is_default()
             && self.generate_speech.is_default()
+            && self.generate_music.is_default()
     }
 }
 
@@ -347,8 +353,8 @@ impl Config {
     /// `plugins.capabilities` tables are dropped unless the project is
     /// trusted (see [`crate::trust`]). The project file's `providers`,
     /// `acp`, `plugins.registry` and the media tables
-    /// `tools.generate_image`, `tools.edit_image` and
-    /// `tools.generate_speech` never apply:
+    /// `tools.generate_image`, `tools.edit_image`,
+    /// `tools.generate_speech` and `tools.generate_music` never apply:
     /// those are only read from the user config.
     /// `plugins.disabled` is the union of the user's list and the
     /// winning layer's, so a project can disable a plugin but never

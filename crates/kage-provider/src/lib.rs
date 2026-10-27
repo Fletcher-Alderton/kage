@@ -21,6 +21,7 @@ pub mod interrupt;
 pub mod media;
 pub mod metadata;
 mod multipart;
+pub mod music;
 pub mod openai;
 pub mod openai_responses;
 pub mod registry;

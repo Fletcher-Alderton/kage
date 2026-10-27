@@ -18,6 +18,7 @@ mod images;
 mod mailbox_tool;
 mod mcp;
 mod media_tool;
+mod music_tool;
 mod plan_tool;
 mod plugin_tools;
 mod question_tool;
@@ -78,11 +79,16 @@ use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
 pub(crate) use edit_image_tool::EDIT_IMAGE_TOOL;
 pub(crate) use image_tool::GENERATE_IMAGE_TOOL;
+pub(crate) use music_tool::GENERATE_MUSIC_TOOL;
 pub(crate) use speech_tool::GENERATE_SPEECH_TOOL;
 
 /// Media tools whose endpoint credentials can be saved by name.
-pub(crate) const MEDIA_TOOLS: &[&str] =
-    &[GENERATE_IMAGE_TOOL, EDIT_IMAGE_TOOL, GENERATE_SPEECH_TOOL];
+pub(crate) const MEDIA_TOOLS: &[&str] = &[
+    GENERATE_IMAGE_TOOL,
+    EDIT_IMAGE_TOOL,
+    GENERATE_SPEECH_TOOL,
+    GENERATE_MUSIC_TOOL,
+];
 
 /// A session to host, with the resources its runs use.
 pub(crate) struct SessionSpec {

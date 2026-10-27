@@ -21,7 +21,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
 use kage_core::CancelFlag;
 
 use crate::ProviderError;
@@ -285,10 +284,10 @@ fn parse_answer(
         .pointer("/data/0")
         .ok_or_else(|| ProviderError::Decode("the image answer holds no image".to_owned()))?;
     let bytes = if let Some(encoded) = first.get("b64_json").and_then(serde_json::Value::as_str) {
-        decode_base64(encoded)?
+        media::decode_base64(encoded, "the image")?
     } else if let Some(url) = first.get("url").and_then(serde_json::Value::as_str) {
         match url.strip_prefix("data:") {
-            Some(uri) => decode_data_uri(uri)?,
+            Some(uri) => media::decode_data_uri(uri, "the image")?,
             None => fetch_link(url)?,
         }
     } else {
@@ -311,31 +310,11 @@ fn parse_answer(
     })
 }
 
-/// The payload of a `data:` URI, given without its scheme. Only base64
-/// payloads are read; an image is never sent percent-encoded.
-fn decode_data_uri(uri: &str) -> Result<Vec<u8>, ProviderError> {
-    match uri.split_once(',') {
-        Some((meta, payload)) if meta.ends_with(";base64") => decode_base64(payload),
-        _ => Err(ProviderError::Decode(
-            "the image `data:` URI is not base64".to_owned(),
-        )),
-    }
-}
-
-/// Standard base64, ignoring the line breaks some servers wrap it with.
-fn decode_base64(encoded: &str) -> Result<Vec<u8>, ProviderError> {
-    let compact: String = encoded
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .collect();
-    base64::engine::general_purpose::STANDARD
-        .decode(compact)
-        .map_err(|e| ProviderError::Decode(format!("the image is not valid base64: {e}")))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    use base64::Engine as _;
     use std::io::Write as _;
     use std::net::TcpListener;
 

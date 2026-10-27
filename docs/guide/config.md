@@ -113,6 +113,12 @@ scrub_env = []
 # model = "speech-small"
 # voice = "alloy"
 
+[tools.generate_music]
+# the music endpoint the generate_music tool calls. Without one the
+# tool is not offered. See "music" below.
+# base_url = "https://music.example.com/v1"
+# model = "music"
+
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
 # leader = "<C-x>"
@@ -226,8 +232,8 @@ All of them share one trust decision. Every other project key, such
 as `[ui]`, `[loop]` or `[agents]`, applies without trust. Provider
 settings, `[acp.agents]`, `[tools.generate_image]`,
 `[tools.edit_image]`, `[tools.generate_speech]`,
-`provider.default_model` and `plugins.dir` are only read from your
-user config.
+`[tools.generate_music]`, `provider.default_model` and `plugins.dir`
+are only read from your user config.
 
 When the TUI starts in a project that sets any of these, it lists what
 the project asks for (server commands and URLs, sampling, capability
@@ -410,6 +416,50 @@ first:
 
 ```toml
 [permissions.tools.generate_speech]
+default = "ask"
+```
+
+## music
+
+The `generate_music` tool makes one song from a style prompt and,
+optionally, lyrics. There is no common music API, so kage sends the
+shape some gateways offer beside their images API:
+`POST {base_url}/music/generations` with `model`, `prompt`, and
+`lyrics`, `instrumental` and `seed` when the call names them. kage
+offers the tool only when `[tools.generate_music]` names an endpoint
+and a model.
+
+```toml
+[tools.generate_music]
+base_url = "https://music.example.com/v1"
+api_key_env = "MUSIC_API_KEY"    # or a key saved for the tool, below
+model = "music"
+```
+
+The table takes the same keys as `[tools.generate_image]`. To keep the
+key out of the environment, save it for the tool with
+`kage auth login generate_music` and leave out `api_key_env`.
+
+The song comes back in the answer's first `data` entry, as base64 in
+`b64_json`, as a `data:` URI in `url`, or as a link in `url`. kage
+fetches a link only when it is on the endpoint's own host, without the
+key and without following a redirect. A song that cannot be read, such
+as one linked on another host, still counts as made: the result says
+why and gives the link, which anyone holding it can fetch until the
+server drops it, so the link stays in the session. The seed the server
+used, and any note it sends, come with the result.
+
+Like a speech clip, the song stays in the session, and `/media` or the
+desktop plays and saves it. A call writes a file only when it names a
+`path`. A song can take a minute or more; `timeout_secs` defaults to
+180.
+
+The tool counts as a write, as `generate_speech` does, and permission
+rules name it `generate_music`. Each call costs a song, so to approve
+each one first:
+
+```toml
+[permissions.tools.generate_music]
 default = "ask"
 ```
 

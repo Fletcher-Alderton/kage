@@ -16,6 +16,7 @@ use kage_tools::{ToolError, ToolRegistry};
 
 use super::edit_image_tool::{EDIT_IMAGE_TOOL, EditImageTool};
 use super::image_tool::{GENERATE_IMAGE_TOOL, GenerateImageTool};
+use super::music_tool::{GENERATE_MUSIC_TOOL, GenerateMusicTool};
 use super::speech_tool::{GENERATE_SPEECH_TOOL, GenerateSpeechTool};
 use crate::auth::{self, AuthStore};
 
@@ -45,6 +46,7 @@ impl WithMediaTools for ToolRegistry {
         if config.tools.generate_image.is_default()
             && config.tools.edit_image.is_default()
             && config.tools.generate_speech.is_default()
+            && config.tools.generate_music.is_default()
         {
             return self;
         }
@@ -73,6 +75,16 @@ impl WithMediaTools for ToolRegistry {
                 Err(reason) => {
                     eprintln!(
                         "kage: [tools.generate_speech] {reason}; {GENERATE_SPEECH_TOOL} is off"
+                    );
+                }
+            }
+        }
+        if !config.tools.generate_music.is_default() {
+            match GenerateMusicTool::from_config(config, &store) {
+                Ok(tool) => self.register(Arc::new(tool)),
+                Err(reason) => {
+                    eprintln!(
+                        "kage: [tools.generate_music] {reason}; {GENERATE_MUSIC_TOOL} is off"
                     );
                 }
             }
