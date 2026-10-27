@@ -1008,32 +1008,51 @@ impl Store {
     /// item's turn; without, all of it. A `through` past the
     /// transcript's end is refused with a note: the row the click
     /// named is gone. Reports whether a request went out.
-    /// Asks the engine to save the `nth` image of transcript item `ix`
-    /// of the active session (a model's image, or one a tool produced)
-    /// into the session's directory, under `generated/`. The engine says
-    /// where it went as a notice on the session.
-    pub fn save_image(&mut self, ix: usize, nth: usize) {
+    /// Asks the engine to save the `nth` image or clip of transcript
+    /// item `ix` of the active session (the model's, or one a tool
+    /// produced) into the session's directory, under `generated/`. The
+    /// engine says where it went as a notice on the session.
+    pub fn save_media(&mut self, ix: usize, nth: usize) {
         use base64::Engine as _;
         use sha2::Digest as _;
 
         let Some(id) = self.active.clone() else {
             return;
         };
-        let data = match self.state().session(&id).and_then(|s| s.items.get(ix)) {
-            Some(kage_client::TranscriptItem::Media { data, .. }) if nth == 0 => data.clone(),
-            Some(kage_client::TranscriptItem::ToolCall(call)) => {
-                match crate::ui::transcript::media_rows::tool_images(call).get(nth) {
-                    Some((_, data)) => (*data).to_owned(),
-                    None => return,
-                }
-            }
-            _ => return,
+        let Some((_, data)) = self.media_at(&id, ix, nth) else {
+            return;
         };
         let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
             return;
         };
         let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
         self.client.image_save(&id, &sha256, None);
+    }
+
+    /// Plays the `nth` clip of transcript item `ix` of the active
+    /// session, here rather than on the engine's host.
+    pub fn play_media(&mut self, ix: usize, nth: usize) {
+        let Some(id) = self.active.clone() else {
+            return;
+        };
+        if let Some((mime, data)) = self.media_at(&id, ix, nth) {
+            crate::external::play(&mime, &data);
+        }
+    }
+
+    /// The type and base64 bytes of the `nth` image or clip of item
+    /// `ix` of session `id`: a model's media item, or a tool call's.
+    fn media_at(&self, id: &str, ix: usize, nth: usize) -> Option<(String, String)> {
+        match self.state().session(id)?.items.get(ix)? {
+            kage_client::TranscriptItem::Media { mime, data } if nth == 0 => {
+                Some((mime.clone(), data.clone()))
+            }
+            kage_client::TranscriptItem::ToolCall(call) => {
+                let (mime, data) = *crate::ui::transcript::media_rows::tool_media(call).get(nth)?;
+                Some((mime.to_owned(), data.to_owned()))
+            }
+            _ => None,
+        }
     }
 
     pub fn fork(&mut self, through: Option<usize>) -> bool {

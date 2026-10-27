@@ -105,8 +105,8 @@ pub enum RowAction {
     Fork(Option<usize>),
     /// Rewind the session to before the prompt at this item.
     Rewind(usize),
-    /// Save the `nth` image of this item into the session's directory.
-    SaveImage(usize, usize),
+    /// A button pressed on the `nth` image or clip of this item.
+    Media(usize, usize, super::media_rows::MediaPress),
 }
 
 /// The plan card's revise field: which card's field shows, and the

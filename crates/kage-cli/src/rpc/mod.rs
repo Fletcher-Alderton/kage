@@ -767,13 +767,14 @@ impl Agent for CliAcpAgent {
         self.options_list(ConfigGetRequest::default())
     }
 
-    /// Saves an image the model produced. The engine reports where it
-    /// went, or why it could not, as a notice on the session.
+    /// Saves an image or audio clip the model or a tool produced. The
+    /// engine reports where it went, or why it could not, as a notice
+    /// on the session.
     fn image_save(&self, req: ImageSaveRequest) -> Result<serde_json::Value, RpcError> {
         let id = self.engine_id(&req.session_id)?;
         self.host.engine.send(Command::to(
             id,
-            CommandKind::Image {
+            CommandKind::Media {
                 action: kage_core::protocol::ImageAction::Save,
                 sha256: Some(req.sha256),
                 path: req.path.map(std::path::PathBuf::from),

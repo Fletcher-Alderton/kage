@@ -253,7 +253,7 @@ pub fn install_hint() -> &'static str {
 /// on the web build, where the page is one tab away already.
 pub fn open_releases() {
     #[cfg(not(target_arch = "wasm32"))]
-    native::open_in_browser(releases_page(crate::prefs::load().channel));
+    crate::external::open(releases_page(crate::prefs::load().channel).as_ref());
 }
 
 /// Downloads the newest engine release of the saved channel for this
@@ -707,22 +707,6 @@ mod native {
             std::env::var_os("HOME")
                 .map(|base| PathBuf::from(base).join(".local").join("bin"))
                 .ok_or_else(|| "HOME is not set".to_owned())
-        }
-    }
-
-    /// Opens a URL in the user's browser and does not wait for it.
-    pub(super) fn open_in_browser(url: &str) {
-        let opened = if cfg!(windows) {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()
-        } else if cfg!(target_os = "macos") {
-            std::process::Command::new("open").arg(url).spawn()
-        } else {
-            std::process::Command::new("xdg-open").arg(url).spawn()
-        };
-        if let Err(error) = opened {
-            crate::warn(&format!("the browser did not open: {error}"));
         }
     }
 }

@@ -3,8 +3,9 @@
 //! An image is decoded from the transcript's base64 once and handed to
 //! egui under a `bytes://` URI named after its content, so egui's image
 //! loader decodes it once and caches the texture; later frames only
-//! look the URI up. Media egui cannot draw, such as audio, shows as a
-//! line naming its type and size.
+//! look the URI up. An audio clip shows as a line naming its type and
+//! size, with buttons to play it and save it. Other media egui cannot
+//! draw shows as the line alone.
 
 use std::hash::{Hash as _, Hasher as _};
 
@@ -18,15 +19,46 @@ const MAX_H: f32 = 420.0;
 /// The widest an image is drawn, in points, on a wide column.
 const MAX_W: f32 = 640.0;
 
+/// A button pressed on a media item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaPress {
+    /// Save it into the workspace.
+    Save,
+    /// Play it, for an audio clip.
+    Play,
+}
+
 /// One media item: the image scaled to the column with its type and
-/// size under it and a button to save it into the workspace, or the
-/// line alone for media egui cannot draw. The flag says the button was
-/// pressed.
-pub fn render_media(ui: &mut egui::Ui, mime: &str, data: &str) -> (egui::Response, bool) {
+/// size under it and a button to save it into the workspace, a clip's
+/// line with buttons to play and save it, or the line alone for media
+/// egui cannot draw. Also returns the button pressed, if any.
+pub fn render_media(
+    ui: &mut egui::Ui,
+    mime: &str,
+    data: &str,
+) -> (egui::Response, Option<MediaPress>) {
     let palette = Palette::active_of(ui.ctx());
     let caption = format!("{mime}, {}", size_label(data.len() / 4 * 3));
+    if mime.starts_with("audio/") {
+        let mut pressed = None;
+        let response = ui
+            .horizontal(|ui| {
+                caption_line(ui, &caption, palette.faint);
+                if button(ui, "Play", crate::icons::Icon::Play, palette)
+                    .on_hover_text("Play it with the system's player")
+                    .clicked()
+                {
+                    pressed = Some(MediaPress::Play);
+                }
+                if save_button(ui, palette).clicked() {
+                    pressed = Some(MediaPress::Save);
+                }
+            })
+            .response;
+        return (response, pressed);
+    }
     if !mime.starts_with("image/") {
-        return (caption_line(ui, &caption, palette.faint), false);
+        return (caption_line(ui, &caption, palette.faint), None);
     }
     let uri = media_uri(mime, data);
     let seen = egui::Id::new(("kage-media", &uri));
@@ -37,12 +69,12 @@ pub fn render_media(ui: &mut egui::Ui, mime: &str, data: &str) -> (egui::Respons
                 &format!("{caption}: the image data is damaged"),
                 palette.danger,
             );
-            return (line, false);
+            return (line, None);
         };
         ui.ctx().include_bytes(uri.clone(), bytes);
         ui.ctx().data_mut(|d| d.insert_temp(seen, true));
     }
-    let mut save = false;
+    let mut pressed = None;
     let response = ui
         .vertical(|ui| {
             let width = ui.available_width().min(MAX_W);
@@ -55,29 +87,50 @@ pub fn render_media(ui: &mut egui::Ui, mime: &str, data: &str) -> (egui::Respons
             ui.add_space(SP_1);
             ui.horizontal(|ui| {
                 caption_line(ui, &caption, palette.faint);
-                save = crate::ui::settings_config::btn_sm(
-                    ui,
-                    "Save to workspace",
-                    Some(crate::icons::Icon::Download),
-                    crate::ui::settings_config::BtnTone::Plain,
-                    palette,
-                )
-                .on_hover_text("Write it under generated/ in the session's folder")
-                .clicked();
+                if save_button(ui, palette).clicked() {
+                    pressed = Some(MediaPress::Save);
+                }
             });
         })
         .response;
-    (response, save)
+    (response, pressed)
 }
 
-/// The images a tool call's content carries, as `(mime, base64)`.
+fn save_button(ui: &mut egui::Ui, palette: &Palette) -> egui::Response {
+    button(
+        ui,
+        "Save to workspace",
+        crate::icons::Icon::Download,
+        palette,
+    )
+    .on_hover_text("Write it under generated/ in the session's folder")
+}
+
+fn button(
+    ui: &mut egui::Ui,
+    label: &str,
+    icon: crate::icons::Icon,
+    palette: &Palette,
+) -> egui::Response {
+    crate::ui::settings_config::btn_sm(
+        ui,
+        label,
+        Some(icon),
+        crate::ui::settings_config::BtnTone::Plain,
+        palette,
+    )
+}
+
+/// The images and audio clips a tool call's content carries, as
+/// `(mime, base64)`.
 #[must_use]
-pub fn tool_images(call: &kage_client::ToolCallItem) -> Vec<(&str, &str)> {
+pub fn tool_media(call: &kage_client::ToolCallItem) -> Vec<(&str, &str)> {
     call.content
         .iter()
         .filter_map(|content| match content {
             kage_client::wire::ToolCallContent::Content(chunk) => match &chunk.content {
-                kage_client::wire::ContentBlock::Image(blob) => {
+                kage_client::wire::ContentBlock::Image(blob)
+                | kage_client::wire::ContentBlock::Audio(blob) => {
                     Some((blob.mime_type.as_str(), blob.data.as_str()))
                 }
                 _ => None,
@@ -122,7 +175,49 @@ fn caption_line(ui: &mut egui::Ui, text: &str, color: egui::Color32) -> egui::Re
 
 #[cfg(test)]
 mod tests {
-    use super::{media_uri, size_label};
+    use kage_client::wire::{
+        BlobContent, ContentBlock, MessageChunk, ToolCallContent, ToolCallStatus, ToolKind,
+    };
+
+    use super::{media_uri, size_label, tool_media};
+
+    fn chunk(content: ContentBlock) -> ToolCallContent {
+        ToolCallContent::Content(MessageChunk {
+            content,
+            meta: None,
+        })
+    }
+
+    fn blob(mime: &str, data: &str) -> BlobContent {
+        BlobContent {
+            data: data.to_owned(),
+            mime_type: mime.to_owned(),
+            uri: None,
+        }
+    }
+
+    #[test]
+    fn a_tool_calls_images_and_clips_are_its_media_in_order() {
+        let call = kage_client::ToolCallItem {
+            tool_call_id: "c1".to_owned(),
+            title: "generate_speech".to_owned(),
+            kind: ToolKind::Other,
+            status: ToolCallStatus::Completed,
+            input: None,
+            swarm: None,
+            content: vec![
+                chunk(ContentBlock::Audio(blob("audio/mpeg", "SUQz"))),
+                chunk(ContentBlock::text("read aloud")),
+                chunk(ContentBlock::Image(blob("image/png", "iVBO"))),
+            ],
+            raw_output: None,
+            took_ms: None,
+        };
+        assert_eq!(
+            tool_media(&call),
+            [("audio/mpeg", "SUQz"), ("image/png", "iVBO")]
+        );
+    }
 
     #[test]
     fn an_image_uri_follows_its_content_and_type() {

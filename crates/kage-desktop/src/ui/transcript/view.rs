@@ -871,10 +871,8 @@ fn render_row(
         },
         Row::Media { ix } => match session.items.get(*ix) {
             Some(TranscriptItem::Media { mime, data }) => {
-                let (response, save) = super::media_rows::render_media(ui, mime, data);
-                if save {
-                    events.push(RowAction::SaveImage(*ix, 0));
-                }
+                let (response, pressed) = super::media_rows::render_media(ui, mime, data);
+                events.extend(pressed.map(|pressed| RowAction::Media(*ix, 0, pressed)));
                 response
             }
             _ => blank_row(ui),
@@ -920,7 +918,7 @@ fn render_row(
                 response
             }
             Some(TranscriptItem::ToolCall(call)) => {
-                let images = super::media_rows::tool_images(call);
+                let media = super::media_rows::tool_media(call);
                 let mut render = |ui: &mut egui::Ui, events: &mut Vec<RowAction>| {
                     let (response, actions) = tool_rows::render_tool(
                         ui,
@@ -934,19 +932,18 @@ fn render_row(
                     events.extend(actions);
                     response
                 };
-                if images.is_empty() {
+                if media.is_empty() {
                     render(ui, events)
                 } else {
-                    // A tool's images show under its row, open or not:
-                    // the picture is usually why it ran.
+                    // A tool's images and clips show under its row, open
+                    // or not: the media is usually why it ran.
                     ui.vertical(|ui| {
                         render(ui, events);
-                        for (nth, (mime, data)) in images.iter().enumerate() {
+                        for (nth, (mime, data)) in media.iter().enumerate() {
                             ui.add_space(crate::theme::SP_2);
-                            let (_, save) = super::media_rows::render_media(ui, mime, data);
-                            if save {
-                                events.push(RowAction::SaveImage(*ix, nth));
-                            }
+                            let (_, pressed) = super::media_rows::render_media(ui, mime, data);
+                            events
+                                .extend(pressed.map(|pressed| RowAction::Media(*ix, nth, pressed)));
                         }
                     })
                     .response

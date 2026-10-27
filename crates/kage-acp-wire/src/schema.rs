@@ -1056,13 +1056,14 @@ pub struct RegistryInstallResult {
     pub capabilities: Vec<String>,
 }
 
-/// `_kage/image/save` request params.
+/// `_kage/image/save` request params. Despite the name, it saves an
+/// audio clip as well as an image.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageSaveRequest {
-    /// The session the image is in.
+    /// The session the image or clip is in.
     pub session_id: String,
-    /// The sha256 of the image's bytes, lowercase hex.
+    /// The sha256 of the image's or clip's bytes, lowercase hex.
     pub sha256: String,
     /// Where to write it, relative to the session's directory. Omitted,
     /// a new file under `generated/`.

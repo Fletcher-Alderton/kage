@@ -13,6 +13,7 @@ mod appearance;
 #[allow(dead_code)]
 mod assets;
 pub mod clock;
+mod external;
 pub mod fonts;
 /// Frame-time instrumentation behind `KAGE_FRAME_TIMES`, for the
 /// NFR-01 budget.

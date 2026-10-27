@@ -667,8 +667,8 @@ impl Client {
         )
     }
 
-    /// Asks the engine to save the image whose bytes hash to `sha256`
-    /// into session `session_id`'s directory, at `path` or under
+    /// Asks the engine to save the image or audio clip whose bytes hash
+    /// to `sha256` into session `session_id`'s directory, at `path` or under
     /// `generated/`. The outcome arrives as a notice on the session.
     pub fn image_save(&mut self, session_id: &str, sha256: &str, path: Option<&str>) -> u64 {
         self.request(

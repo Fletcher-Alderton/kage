@@ -1538,6 +1538,7 @@ impl ShellApp {
         panels: &mut crate::ui::shell::Panels,
         action: crate::ui::transcript::tool_rows::RowAction,
     ) {
+        use crate::ui::transcript::media_rows::MediaPress;
         use crate::ui::transcript::tool_rows::RowAction;
         use crate::ui::workbench::Tab;
         match action {
@@ -1570,7 +1571,8 @@ impl ShellApp {
             RowAction::Fork(through) => {
                 self.shell.store.fork(through);
             }
-            RowAction::SaveImage(ix, nth) => self.shell.store.save_image(ix, nth),
+            RowAction::Media(ix, nth, MediaPress::Save) => self.shell.store.save_media(ix, nth),
+            RowAction::Media(ix, nth, MediaPress::Play) => self.shell.store.play_media(ix, nth),
             RowAction::Rewind(prompt) => {
                 // A rewind drops history, so it asks first, as the
                 // reference does; the dialog carries it out.
