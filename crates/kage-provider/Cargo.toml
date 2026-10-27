@@ -21,6 +21,7 @@ testing = []
 base64.workspace = true
 chrono.workspace = true
 crossbeam-channel.workspace = true
+getrandom.workspace = true
 kage-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

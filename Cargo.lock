@@ -3292,6 +3292,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "crossbeam-channel",
+ "getrandom 0.4.3",
  "kage-core",
  "serde",
  "serde_json",

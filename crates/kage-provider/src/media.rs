@@ -64,6 +64,14 @@ impl From<ProviderError> for MediaError {
 pub(crate) enum RequestBody {
     /// A JSON request with the protocol's content type.
     Json(serde_json::Value),
+    /// A `multipart/form-data` request, as an image edit is sent. The
+    /// content type names the boundary the bytes are built with.
+    Multipart {
+        /// The whole `multipart/form-data; boundary=...` header value.
+        content_type: String,
+        /// The body: every part and the closing boundary included.
+        bytes: Vec<u8>,
+    },
 }
 
 /// Send one request within the call's remaining deadline. A refusal
@@ -91,6 +99,7 @@ pub(crate) fn call(
         .then(|| ("authorization", format!("Bearer {}", endpoint.api_key)));
     let content_type = match &body {
         RequestBody::Json(_) => "application/json",
+        RequestBody::Multipart { content_type, .. } => content_type,
     };
     let headers = crate::headers::request_headers(
         &[("content-type", content_type.to_owned())],
@@ -105,6 +114,7 @@ pub(crate) fn call(
         }
         match body {
             RequestBody::Json(json) => post.send_json(&json),
+            RequestBody::Multipart { bytes, .. } => post.send(bytes),
         }
     })
     .map_err(late)?;

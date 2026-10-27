@@ -20,6 +20,7 @@ pub mod images;
 pub mod interrupt;
 pub mod media;
 pub mod metadata;
+mod multipart;
 pub mod openai;
 pub mod openai_responses;
 pub mod registry;

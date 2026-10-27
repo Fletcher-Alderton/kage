@@ -77,13 +77,21 @@ pub struct ToolsConfig {
     /// registered.
     #[serde(default, skip_serializing_if = "MediaToolConfig::is_default")]
     pub generate_image: MediaToolConfig,
+    /// The images endpoint the `edit_image` tool calls
+    /// (`[tools.edit_image]`). Without one the tool is not
+    /// registered.
+    #[serde(default, skip_serializing_if = "MediaToolConfig::is_default")]
+    pub edit_image: MediaToolConfig,
 }
 
 impl ToolsConfig {
     /// Whether nothing is configured.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.rename.is_empty() && self.web_search.is_default() && self.generate_image.is_default()
+        self.rename.is_empty()
+            && self.web_search.is_default()
+            && self.generate_image.is_default()
+            && self.edit_image.is_default()
     }
 }
 
@@ -307,7 +315,8 @@ impl Config {
     /// The project file's `mcp`, `permissions` and
     /// `plugins.capabilities` tables are dropped unless the project is
     /// trusted (see [`crate::trust`]). The project file's `providers`,
-    /// `acp`, `plugins.registry` and `tools.generate_image` never apply:
+    /// `acp`, `plugins.registry` and the media tables
+    /// `tools.generate_image` and `tools.edit_image` never apply:
     /// those are only read from the user config.
     /// `plugins.disabled` is the union of the user's list and the
     /// winning layer's, so a project can disable a plugin but never
@@ -2359,5 +2368,32 @@ default = "ask"   # keep asking
         );
         // The default config carries no renames.
         assert!(Config::default().tools.is_default());
+    }
+
+    #[test]
+    fn tools_edit_image_roundtrips_and_hides_by_default() {
+        let _globals = process_globals();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.tools.edit_image = MediaToolConfig {
+            base_url: Some("https://api.example.com/v1".into()),
+            api_key_env: Some("EDIT_IMAGE_API_KEY".into()),
+            headers: BTreeMap::from([("X-Team".to_owned(), "infra".to_owned())]),
+            model: Some("image-large".into()),
+            timeout_secs: Some(60),
+            ..MediaToolConfig::default()
+        };
+        assert!(!cfg.tools.is_default());
+        std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded, cfg);
+
+        let default_body = toml::to_string(&Config::default()).unwrap();
+        assert!(!default_body.contains("edit_image"), "{default_body}");
+
+        let mut only_model = Config::default();
+        only_model.tools.edit_image.model = Some("image-large".into());
+        assert!(!only_model.tools.is_default());
     }
 }

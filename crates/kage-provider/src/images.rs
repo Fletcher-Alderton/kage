@@ -1,6 +1,8 @@
-//! Image generation over the `OpenAI` Images API:
-//! `POST {base_url}/images/generations`, one image a call, answered as
-//! base64.
+//! Image generation and editing over the `OpenAI` Images API.
+//! Generation is `POST {base_url}/images/generations`, one image a
+//! call, answered as base64. Editing is `POST {base_url}/images/edits`,
+//! sent as `multipart/form-data` carrying one image's bytes, and
+//! answered the same way.
 //!
 //! Many providers and self-hosted servers speak this shape. The answer
 //! arrives whole rather than streamed, so a call carries a ceiling on
@@ -14,6 +16,7 @@
 //! that answers an `http(s)` link is refused rather than followed:
 //! fetching it would be a second request to a host nobody configured.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -47,6 +50,23 @@ pub struct GeneratedImage {
     /// free text: servers put the prompt they rewrote here, and some put
     /// other notices, such as a fallback to another model.
     pub revised_prompt: Option<String>,
+}
+
+/// One image to edit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageEdit {
+    /// The model the server is asked for.
+    pub model: String,
+    /// What to change.
+    pub prompt: String,
+    /// The size as `WxH`, which a server may round or refuse. `None`
+    /// leaves it to the server.
+    pub size: Option<String>,
+    /// The image file's bytes, as read from the workspace.
+    pub image: Vec<u8>,
+    /// The type the bytes themselves declare, as
+    /// [`kage_core::image::sniff_mime`] answers it.
+    pub mime: &'static str,
 }
 
 /// Generate one image, waiting at most `timeout` for the whole call.
@@ -113,6 +133,102 @@ fn post(
         endpoint,
         "images/generations",
         RequestBody::Json(body),
+        "the image answer",
+        deadline,
+        timeout,
+        cancel,
+    )?;
+    Ok(parse_answer(&body)?)
+}
+
+/// Edit one image from a prompt, waiting at most `timeout` for the
+/// whole call.
+///
+/// The request is `multipart/form-data` carrying the model, the prompt
+/// and the image's bytes. When `ask_base64` is set the answer is asked
+/// for as base64; a refusal naming that field stores `false` in it and
+/// the request is asked once more without it, within the same deadline,
+/// so the field stays off for later calls.
+///
+/// Setting `cancel` ends the call at once, closing its connection.
+///
+/// # Errors
+///
+/// - [`ProviderError::Cancelled`] when `cancel` is set first.
+/// - [`ProviderError::Transport`] when the server cannot be reached or
+///   does not answer within `timeout`.
+/// - [`ProviderError::RateLimited`], [`ProviderError::Auth`] or
+///   [`ProviderError::Http`] for a refusal, carrying the server's
+///   message.
+/// - [`ProviderError::Decode`] for an answer that holds no image this
+///   client reads: no `data`, a link instead of bytes, bad base64, a
+///   body over [`media::MAX_RESPONSE_BYTES`], or bytes that are not a
+///   PNG, JPEG, GIF or WebP image.
+pub fn edit(
+    endpoint: &MediaEndpoint,
+    edit: &ImageEdit,
+    timeout: Duration,
+    cancel: &CancelFlag,
+    ask_base64: &AtomicBool,
+) -> Result<GeneratedImage, MediaError> {
+    let deadline = Instant::now() + timeout;
+    let ask = ask_base64.load(Ordering::Relaxed);
+    let mut result = post_edit(endpoint, edit, deadline, timeout, cancel, ask);
+    // A 400 is answered before any image is written, so asking again
+    // costs a re-upload and no generation. The retry shares the
+    // deadline, and the refusal is remembered for later calls.
+    if ask
+        && result
+            .as_ref()
+            .is_err_and(|error| names_field(error, "response_format"))
+    {
+        ask_base64.store(false, Ordering::Relaxed);
+        result = post_edit(endpoint, edit, deadline, timeout, cancel, false);
+    }
+    result.map_err(|refused| MediaError {
+        error: server_message(refused.error),
+        ..refused
+    })
+}
+
+/// One request, asking for base64 when `ask_base64` is set, given what
+/// is left until `deadline` of the call's `timeout`. An HTTP error
+/// keeps its body as sent.
+fn post_edit(
+    endpoint: &MediaEndpoint,
+    edit: &ImageEdit,
+    deadline: Instant,
+    timeout: Duration,
+    cancel: &CancelFlag,
+    ask_base64: bool,
+) -> Result<GeneratedImage, MediaError> {
+    let extension = kage_core::image::extension_for(edit.mime);
+    debug_assert!(extension.is_some(), "{} is not a sniffed type", edit.mime);
+    let extension = extension.unwrap_or("png");
+    let mut form = crate::multipart::Form::new();
+    form.text("model", &edit.model);
+    form.text("prompt", &edit.prompt);
+    form.text("n", "1");
+    if ask_base64 {
+        form.text("response_format", "b64_json");
+    }
+    if let Some(size) = &edit.size {
+        form.text("size", size);
+    }
+    form.file(
+        "image",
+        &format!("image.{extension}"),
+        edit.mime,
+        &edit.image,
+    );
+    let (content_type, body) = form.finish();
+    let body = media::call(
+        endpoint,
+        "images/edits",
+        RequestBody::Multipart {
+            content_type,
+            bytes: body,
+        },
         "the image answer",
         deadline,
         timeout,
@@ -581,5 +697,327 @@ mod tests {
             "{err:?}"
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Read one request off `listener` as raw bytes and answer it with
+    /// `status`, `headers` and `body`. Returns the request read.
+    /// Multipart bodies are not UTF-8, so the bytes are kept as read.
+    fn serve_bytes(
+        listener: TcpListener,
+        status: &'static str,
+        headers: &'static str,
+        body: String,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let raw = crate::testing::read_request_bytes(&mut conn);
+            let answer = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{headers}\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            conn.write_all(answer.as_bytes()).unwrap();
+            raw
+        })
+    }
+
+    /// Answer one request per entry of `answers`, in order, and return
+    /// the requests read as raw bytes.
+    fn serve_each_bytes(
+        listener: TcpListener,
+        answers: Vec<(&'static str, String)>,
+    ) -> std::thread::JoinHandle<Vec<Vec<u8>>> {
+        std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, body) in answers {
+                let (mut conn, _) = listener.accept().unwrap();
+                requests.push(crate::testing::read_request_bytes(&mut conn));
+                let answer = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                conn.write_all(answer.as_bytes()).unwrap();
+            }
+            requests
+        })
+    }
+
+    fn edit_request(size: Option<String>) -> ImageEdit {
+        ImageEdit {
+            model: "image:max".to_owned(),
+            prompt: "make the kite blue".to_owned(),
+            size,
+            image: PNG.to_vec(),
+            mime: "image/png",
+        }
+    }
+
+    /// Serve one request for `image`, answer it, and return the call's
+    /// result and the raw request read.
+    fn run_edit(
+        status: &'static str,
+        headers: &'static str,
+        body: String,
+        ask_base64: &AtomicBool,
+        image: &ImageEdit,
+    ) -> (Result<GeneratedImage, MediaError>, Vec<u8>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_bytes(listener, status, headers, body);
+        let result = edit(
+            &endpoint(format!("http://{addr}/v1/")),
+            image,
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            ask_base64,
+        );
+        (result, server.join().unwrap())
+    }
+
+    /// `haystack` split at its first `needle`: what is before it and
+    /// what follows it.
+    fn split_once<'a>(haystack: &'a [u8], needle: &[u8]) -> Option<(&'a [u8], &'a [u8])> {
+        let at = haystack.windows(needle.len()).position(|w| w == needle)?;
+        Some((&haystack[..at], &haystack[at + needle.len()..]))
+    }
+
+    /// The multipart parts of `request` in order, as name, headers as
+    /// sent (lowercased, for case-insensitive matching) and value.
+    fn parts(request: &[u8]) -> Vec<(String, String, Vec<u8>)> {
+        let head_end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let head = String::from_utf8_lossy(&request[..head_end]).to_lowercase();
+        let boundary = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-type: multipart/form-data; boundary="))
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(boundary.starts_with("kage-"), "{boundary}");
+        let delimiter = format!("\r\n--{boundary}");
+        let dash_boundary = format!("--{boundary}");
+        let mut rest = request[head_end..]
+            .strip_prefix(dash_boundary.as_bytes())
+            .unwrap();
+        let mut found = Vec::new();
+        loop {
+            rest = rest.strip_prefix(b"\r\n").unwrap();
+            let (part_head, after) = split_once(rest, b"\r\n\r\n").unwrap();
+            let part_head = String::from_utf8_lossy(part_head).to_lowercase();
+            let name = part_head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-disposition: form-data; name=\""))
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .to_owned();
+            let (value, after) = split_once(after, delimiter.as_bytes()).unwrap();
+            found.push((name, part_head, value.to_vec()));
+            rest = after;
+            if rest.starts_with(b"--") {
+                assert_eq!(rest, b"--\r\n", "the closing boundary ends the body");
+                return found;
+            }
+        }
+    }
+
+    fn part_names(sent: &[(String, String, Vec<u8>)]) -> Vec<&str> {
+        sent.iter().map(|(name, ..)| name.as_str()).collect()
+    }
+
+    #[test]
+    fn posts_the_edit_parts_with_the_key_and_headers() {
+        let body = format!(r#"{{"data":[{{"b64_json":"{}"}}]}}"#, png_base64());
+        let (result, request) = run_edit(
+            "200 OK",
+            "",
+            body,
+            &AtomicBool::new(true),
+            &edit_request(Some("1024x1024".to_owned())),
+        );
+        let image = result.unwrap();
+        assert_eq!(image.bytes, PNG);
+        assert_eq!(image.mime, "image/png");
+
+        let lower = String::from_utf8_lossy(&request).to_lowercase();
+        assert!(
+            lower.starts_with("post /v1/images/edits "),
+            "a trailing slash on the base must not double: {lower}"
+        );
+        assert!(
+            lower.contains("\r\nauthorization: bearer img-key\r\n"),
+            "{lower}"
+        );
+        assert!(lower.contains("\r\nx-team: art\r\n"), "{lower}");
+        assert!(lower.contains("\r\nuser-agent: kage/"), "{lower}");
+        let sent = parts(&request);
+        assert_eq!(
+            part_names(&sent),
+            ["model", "prompt", "n", "response_format", "size", "image"]
+        );
+        assert_eq!(sent[0].2.as_slice(), b"image:max".as_slice());
+        assert_eq!(sent[1].2.as_slice(), b"make the kite blue".as_slice());
+        assert_eq!(sent[2].2.as_slice(), b"1".as_slice());
+        assert_eq!(sent[3].2.as_slice(), b"b64_json".as_slice());
+        assert_eq!(sent[4].2.as_slice(), b"1024x1024".as_slice());
+        let (_, head, value) = &sent[5];
+        assert!(head.contains("filename=\"image.png\""), "{head}");
+        assert!(head.contains("content-type: image/png"), "{head}");
+        assert_eq!(value.as_slice(), PNG);
+    }
+
+    #[test]
+    fn no_size_sends_no_size_part_and_a_bare_base_still_routes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!(r#"{{"data":[{{"b64_json":"{}"}}]}}"#, png_base64());
+        let server = serve_bytes(listener, "200 OK", "", body);
+        let image = edit(
+            &endpoint(format!("http://{addr}/v1")),
+            &edit_request(None),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &AtomicBool::new(true),
+        )
+        .unwrap();
+        assert_eq!(image.bytes, PNG);
+        let request = server.join().unwrap();
+        let lower = String::from_utf8_lossy(&request).to_lowercase();
+        assert!(lower.starts_with("post /v1/images/edits "), "{lower}");
+        assert_eq!(
+            part_names(&parts(&request)),
+            ["model", "prompt", "n", "response_format", "image"]
+        );
+    }
+
+    #[test]
+    fn an_edit_refusing_response_format_is_asked_again_without_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let unknown = r#"{"error":{"message":"Unknown parameter: 'response_format'.","type":"invalid_request_error","param":"response_format","code":"unknown_parameter"}}"#;
+        let server = serve_each_bytes(
+            listener,
+            vec![
+                ("400 Bad Request", unknown.to_owned()),
+                (
+                    "200 OK",
+                    format!(r#"{{"data":[{{"b64_json":"{}"}}]}}"#, png_base64()),
+                ),
+            ],
+        );
+        let flag = AtomicBool::new(true);
+        let image = edit(
+            &endpoint(format!("http://{addr}/v1")),
+            &edit_request(None),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &flag,
+        )
+        .unwrap();
+        assert_eq!(image.bytes, PNG);
+        assert!(!flag.load(Ordering::Relaxed));
+        let requests = server.join().unwrap();
+        assert!(part_names(&parts(&requests[0])).contains(&"response_format"));
+        assert!(!part_names(&parts(&requests[1])).contains(&"response_format"));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!(r#"{{"data":[{{"b64_json":"{}"}}]}}"#, png_base64());
+        let server = serve_each_bytes(listener, vec![("200 OK", body)]);
+        edit(
+            &endpoint(format!("http://{addr}/v1")),
+            &edit_request(None),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &flag,
+        )
+        .unwrap();
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!part_names(&parts(&requests[0])).contains(&"response_format"));
+    }
+
+    #[test]
+    fn an_edit_bad_request_not_naming_the_field_is_not_asked_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_each_bytes(
+            listener,
+            vec![(
+                "400 Bad Request",
+                r#"{"error":{"message":"the prompt was refused"}}"#.to_owned(),
+            )],
+        );
+        let flag = AtomicBool::new(true);
+        let err = edit(
+            &endpoint(format!("http://{addr}/v1")),
+            &edit_request(None),
+            Duration::from_secs(10),
+            &CancelFlag::new(),
+            &flag,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err.error, ProviderError::Http { status: 400, body } if body == "the prompt was refused"),
+            "{err:?}"
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn an_edit_refusal_carries_the_server_message_and_its_wait() {
+        let (result, _) = run_edit(
+            "401 Unauthorized",
+            "",
+            r#"{"error":{"message":"invalid key"}}"#.to_owned(),
+            &AtomicBool::new(true),
+            &edit_request(None),
+        );
+        assert!(matches!(result.unwrap_err().error, ProviderError::Auth(m) if m == "invalid key"));
+
+        let (result, _) = run_edit(
+            "413 Payload Too Large",
+            "",
+            r#"{"error":{"message":"the image is too large"}}"#.to_owned(),
+            &AtomicBool::new(true),
+            &edit_request(None),
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err.error, ProviderError::Http { status: 413, body } if body == "the image is too large"),
+            "{err:?}"
+        );
+
+        let (result, _) = run_edit(
+            "429 Too Many Requests",
+            "retry-after: 7\r\n",
+            r#"{"error":{"message":"slow down"}}"#.to_owned(),
+            &AtomicBool::new(true),
+            &edit_request(None),
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err.error, ProviderError::RateLimited { body: Some(b), .. } if b == "slow down"),
+            "{err:?}"
+        );
+        assert_eq!(err.retry_after, Some(Duration::from_secs(7)));
+
+        let (result, _) = run_edit(
+            "503 Service Unavailable",
+            "retry-after: 12\r\n",
+            r#"{"error":{"message":"every engine is busy"}}"#.to_owned(),
+            &AtomicBool::new(true),
+            &edit_request(None),
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err.error, ProviderError::Http { status: 503, body } if body == "every engine is busy"),
+            "{err:?}"
+        );
+        assert!(err.error.is_transient());
+        assert_eq!(err.retry_after, Some(Duration::from_secs(12)));
+        assert!(err.to_string().contains("every engine is busy"), "{err}");
     }
 }

@@ -98,7 +98,13 @@ scrub_env = []
 # the images endpoint the generate_image tool calls. Without one the
 # tool is not offered. See "image generation" below.
 # provider = "openai"
-# model = "gpt-image-1"
+# model = "gpt-image-2"
+
+[tools.edit_image]
+# the images endpoint the edit_image tool calls. Without one the
+# tool is not offered. See "image editing" below.
+# provider = "openai"
+# model = "gpt-image-2"
 
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
@@ -212,8 +218,8 @@ parts of it only apply once you trust the project:
 All of them share one trust decision. Every other project key, such
 as `[ui]`, `[loop]` or `[agents]`, applies without trust. Provider
 settings, `[acp.agents]`, `[tools.generate_image]`,
-`provider.default_model` and `plugins.dir` are only read from your
-user config.
+`[tools.edit_image]`, `provider.default_model` and `plugins.dir` are
+only read from your user config.
 
 When the TUI starts in a project that sets any of these, it lists what
 the project asks for (server commands and URLs, sampling, capability
@@ -252,7 +258,7 @@ endpoint and a model:
 # headers.
 [tools.generate_image]
 provider = "openai"
-model = "gpt-image-1"
+model = "gpt-image-2"
 ```
 
 Or name the endpoint itself. `base_url` wins when both are set.
@@ -295,6 +301,56 @@ first:
 
 ```toml
 [permissions.tools.generate_image]
+default = "ask"
+```
+
+## image editing
+
+The `edit_image` tool changes an image you already have from a
+prompt. It takes one PNG, JPEG or WebP file from the workspace plus
+the prompt and sends both to an OpenAI-compatible Images API
+(`POST {base_url}/images/edits`) as a multipart form. The edited
+image comes back with the call, exactly as a generated one does. kage
+offers it only when `[tools.edit_image]` names an endpoint and a
+model:
+
+```toml
+# Reuse a provider kage already reaches, with its base URL, key and
+# headers.
+[tools.edit_image]
+provider = "openai"
+model = "gpt-image-2"
+```
+
+Or name the endpoint itself. `base_url` wins when both are set.
+
+```toml
+[tools.edit_image]
+base_url = "https://images.example.com/v1"
+api_key_env = "IMAGES_API_KEY"   # or a key saved for the tool, below
+model = "image-edit"
+```
+
+The table takes the same keys as `[tools.generate_image]`, and the
+rules for what `provider` may name are as for image generation. It is
+its own table because an edit server often serves another model name,
+and because it has its own permission rule. To keep the key out of
+the environment, save it for the tool with
+`kage auth login edit_image` and leave out `api_key_env`.
+
+The source image is read only from inside the workspace, even with
+`confine_paths = false`, because the file is uploaded, and it may be
+at most 16 MiB. One image goes in per call. There is no mask. A
+`path` saves the result and never replaces an existing file, the
+source included: the name gets `-2`, `-3` and so on.
+
+The tool counts as a write and uploads a file: plan mode and a
+read-only session refuse it, as they refuse `write`, and permission
+rules name it `edit_image`. Each call uploads a file and costs an
+edit, so to approve each one first:
+
+```toml
+[permissions.tools.edit_image]
 default = "ask"
 ```
 

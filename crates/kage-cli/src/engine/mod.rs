@@ -12,6 +12,7 @@
 mod agent_tool;
 mod agents;
 mod bus;
+mod edit_image_tool;
 mod image_tool;
 mod images;
 mod mailbox_tool;
@@ -75,7 +76,10 @@ use swarm_tool::{SWARM_TOOL, SwarmTool};
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
 /// Media tools whose endpoint credentials can be saved by name.
-pub(crate) const MEDIA_TOOLS: &[&str] = &[image_tool::GENERATE_IMAGE_TOOL];
+pub(crate) const MEDIA_TOOLS: &[&str] = &[
+    image_tool::GENERATE_IMAGE_TOOL,
+    edit_image_tool::EDIT_IMAGE_TOOL,
+];
 
 /// A session to host, with the resources its runs use.
 pub(crate) struct SessionSpec {

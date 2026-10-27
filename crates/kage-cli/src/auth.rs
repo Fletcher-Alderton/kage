@@ -1018,6 +1018,10 @@ mod tests {
             "generate_image",
             &config.providers.custom
         ));
+        assert!(login_target_is_known(
+            "edit_image",
+            &config.providers.custom
+        ));
 
         let mut config = kage_core::config::Config::default();
         config.providers.custom.insert(

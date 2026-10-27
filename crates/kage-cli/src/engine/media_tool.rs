@@ -14,6 +14,7 @@ use kage_provider::compat::{COMPAT_PROVIDERS, CompatKind};
 use kage_provider::media::{MediaEndpoint, MediaError};
 use kage_tools::{ToolError, ToolRegistry};
 
+use super::edit_image_tool::{EDIT_IMAGE_TOOL, EditImageTool};
 use super::image_tool::{GENERATE_IMAGE_TOOL, GenerateImageTool};
 use crate::auth::{self, AuthStore};
 
@@ -40,14 +41,27 @@ pub(crate) trait WithMediaTools {
 
 impl WithMediaTools for ToolRegistry {
     fn with_media_tools(mut self, config: &Config) -> Self {
-        if config.tools.generate_image.is_default() {
+        let tables = [&config.tools.generate_image, &config.tools.edit_image];
+        if tables.iter().all(|cfg| cfg.is_default()) {
             return self;
         }
         let store = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
-        match GenerateImageTool::from_config(config, &store) {
-            Ok(tool) => self.register(Arc::new(tool)),
-            Err(reason) => {
-                eprintln!("kage: [tools.generate_image] {reason}; {GENERATE_IMAGE_TOOL} is off");
+        if !config.tools.generate_image.is_default() {
+            match GenerateImageTool::from_config(config, &store) {
+                Ok(tool) => self.register(Arc::new(tool)),
+                Err(reason) => {
+                    eprintln!(
+                        "kage: [tools.generate_image] {reason}; {GENERATE_IMAGE_TOOL} is off"
+                    );
+                }
+            }
+        }
+        if !config.tools.edit_image.is_default() {
+            match EditImageTool::from_config(config, &store) {
+                Ok(tool) => self.register(Arc::new(tool)),
+                Err(reason) => {
+                    eprintln!("kage: [tools.edit_image] {reason}; {EDIT_IMAGE_TOOL} is off");
+                }
             }
         }
         self

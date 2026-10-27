@@ -142,6 +142,13 @@ pub fn collect_ok(
 /// unread data and the client then loses the answer.
 #[cfg(test)]
 pub(crate) fn read_request(conn: &mut std::net::TcpStream) -> String {
+    String::from_utf8(read_request_bytes(conn)).unwrap()
+}
+
+/// [`read_request`] as raw bytes, for a multipart body, which is not
+/// UTF-8.
+#[cfg(test)]
+pub(crate) fn read_request_bytes(conn: &mut std::net::TcpStream) -> Vec<u8> {
     let mut raw = Vec::new();
     let mut buf = [0u8; 4096];
     while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -158,7 +165,7 @@ pub(crate) fn read_request(conn: &mut std::net::TcpStream) -> String {
         let n = std::io::Read::read(conn, &mut buf).unwrap();
         raw.extend_from_slice(&buf[..n]);
     }
-    String::from_utf8(raw).unwrap()
+    raw
 }
 
 #[cfg(test)]
