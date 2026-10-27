@@ -359,7 +359,10 @@ mod tests {
             )
             .unwrap();
         assert!(
-            output.text.contains("Saved as audio/theme.mp3."),
+            output.text.contains(&format!(
+                "Saved as {}.",
+                std::path::Path::new("audio").join("theme.mp3").display()
+            )),
             "{}",
             output.text
         );

@@ -92,6 +92,10 @@ impl EditImageTool {
             std::io::ErrorKind::NotFound => {
                 ToolError::InvalidInput(format!("{name} does not exist"))
             }
+            // Windows refuses to open a directory as a file.
+            _ if source.is_dir() => {
+                ToolError::InvalidInput(format!("{name} is not a regular file"))
+            }
             _ => ToolError::Other(format!("cannot read {}: {err}", source.display())),
         };
         // Opened before it is checked, so the checks describe the file

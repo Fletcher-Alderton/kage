@@ -309,11 +309,8 @@ mod tests {
 
     #[test]
     fn a_path_saves_the_clip_there_with_the_mp3_extension() {
-        for (path, saved_as) in [
-            ("audio/intro.mp3", "audio/intro.mp3"),
-            ("audio/intro.png", "audio/intro.mp3"),
-            ("audio/intro", "audio/intro.mp3"),
-        ] {
+        let saved_as = std::path::Path::new("audio").join("intro.mp3");
+        for path in ["audio/intro.mp3", "audio/intro.png", "audio/intro"] {
             let (url, seen) = speech_server();
             let workdir = tempfile::tempdir().unwrap();
             let cancel = CancelFlag::new();
@@ -323,17 +320,19 @@ mod tests {
                 .unwrap();
             assert!(!output.is_error, "{path}: {}", output.text);
             assert_eq!(
-                std::fs::read(workdir.path().join(saved_as)).unwrap(),
+                std::fs::read(workdir.path().join(&saved_as)).unwrap(),
                 MP3,
                 "{path}"
             );
             assert!(
-                output.text.contains(&format!("Saved as {saved_as}.")),
+                output
+                    .text
+                    .contains(&format!("Saved as {}.", saved_as.display())),
                 "{path}: {}",
                 output.text
             );
             assert_eq!(seen.count(), 1, "{path}");
-            if path != saved_as {
+            if path != "audio/intro.mp3" {
                 assert!(!workdir.path().join(path).exists(), "{path}");
             }
         }

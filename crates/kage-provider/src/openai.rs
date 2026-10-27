@@ -404,19 +404,20 @@ fn convert_user_blocks(blocks: &[Content], audio: bool) -> Vec<Value> {
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"text","text":text})),
             Content::Image { source, mime } => Some(image_to_openai(source, mime)),
-            Content::Audio {
-                source: kage_core::MediaSource::Base64 { data },
-                mime,
-            } if audio && let Some(format) = kage_core::audio::extension_for(mime) => {
-                Some(serde_json::json!({
-                    "type": "input_audio",
-                    "input_audio": {"data": data, "format": format},
-                }))
+            Content::Audio { source, mime } => {
+                Some(match (source, kage_core::audio::extension_for(mime)) {
+                    (kage_core::MediaSource::Base64 { data }, Some(format)) if audio => {
+                        serde_json::json!({
+                            "type": "input_audio",
+                            "input_audio": {"data": data, "format": format},
+                        })
+                    }
+                    _ => serde_json::json!({
+                        "type":"text",
+                        "text": Content::audio_note(mime),
+                    }),
+                })
             }
-            Content::Audio { mime, .. } => Some(serde_json::json!({
-                "type":"text",
-                "text": Content::audio_note(mime),
-            })),
             _ => None,
         })
         .collect()
