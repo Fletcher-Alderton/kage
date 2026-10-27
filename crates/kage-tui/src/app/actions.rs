@@ -1,6 +1,7 @@
 //! Command validation, builtin dispatch, selection, and info screens.
 
 use base64::Engine as _;
+use kage_core::protocol::ImageAction;
 
 use super::*;
 use crate::command::{ArgValue, ParsedArgs};
@@ -231,6 +232,16 @@ impl App {
                 self.run_image_command(rest, path);
                 None
             }
+            "media" => {
+                let path = match args.get("file") {
+                    Some(ArgValue::Path(path)) => {
+                        Some(kage_core::fsutil::expand_tilde(std::path::Path::new(path)))
+                    }
+                    _ => None,
+                };
+                self.run_media_command(rest, path);
+                None
+            }
             "tree" => {
                 self.open_session_tree();
                 None
@@ -316,19 +327,35 @@ impl App {
     /// model produced to the engine, which holds its bytes. `path` is
     /// the parsed `file` of a save.
     pub(crate) fn run_image_command(&mut self, rest: &str, path: Option<std::path::PathBuf>) {
-        use kage_core::protocol::ImageAction;
-        let sub = rest.split_whitespace().next().unwrap_or("");
-        let action = match sub {
-            "open" | "" => ImageAction::Open,
-            "save" => ImageAction::Save,
-            other => {
-                self.push_error(format!(
-                    "image: unknown subcommand `{other}` (try open, save)"
-                ));
-                return;
-            }
+        let Some(action) = self.media_action("image", rest) else {
+            return;
         };
         let _ = self.send_request(RunRequest::Image { action, path });
+    }
+
+    /// `/media open` and `/media save [file]`: like
+    /// [`Self::run_image_command`] over audio clips as well. `path` is
+    /// the parsed `file` of a save.
+    pub(crate) fn run_media_command(&mut self, rest: &str, path: Option<std::path::PathBuf>) {
+        let Some(action) = self.media_action("media", rest) else {
+            return;
+        };
+        let _ = self.send_request(RunRequest::Media { action, path });
+    }
+
+    /// The action an `/image` or `/media` line asks for, or `None`
+    /// after reporting an unknown subcommand.
+    fn media_action(&mut self, command: &str, rest: &str) -> Option<ImageAction> {
+        match rest.split_whitespace().next().unwrap_or("") {
+            "open" | "" => Some(ImageAction::Open),
+            "save" => Some(ImageAction::Save),
+            other => {
+                self.push_error(format!(
+                    "{command}: unknown subcommand `{other}` (try open, save)"
+                ));
+                None
+            }
+        }
     }
 
     pub(crate) fn run_mcp_command(&mut self, rest: &str) {

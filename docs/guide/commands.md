@@ -58,6 +58,8 @@ The table lists every built-in command.
 | `/export [file]`          | Write the session transcript to a Markdown file (defaults to `<session-id-prefix>.md` in the working directory) |
 | `/image [open]`           | Show the newest image the model or a tool produced in the system image viewer |
 | `/image save [file]`      | Write the newest image the model or a tool produced into the working directory (defaults to `generated/<date>-<time>.<ext>`). An existing file is never replaced: the name gets `-2`, `-3`, and so on |
+| `/media [open]`           | Show or play the newest image or audio clip the model or a tool produced, with the system viewer or player |
+| `/media save [file]`      | Write the newest image or audio clip the model or a tool produced into the working directory (defaults to `generated/<date>-<time>.<ext>`). An existing file is never replaced: the name gets `-2`, `-3`, and so on |
 | `/tree`                   | Browse the session fork forest (resume, fork, delete). Agent sessions sit under their parent with an `agent: ` label. |
 | `/clone`                  | Duplicate the session to a new id and continue in the clone |
 | `/undo` | Drop the last exchange: the session branches in place, continuing from just before its last prompt, and the removed prompt goes back into the editor to edit and resend. Earlier turns stay in the file as an abandoned branch, so `/rewind` can still reach them. Refused while a run is in flight |

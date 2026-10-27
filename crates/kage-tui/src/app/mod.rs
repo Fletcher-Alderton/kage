@@ -219,6 +219,14 @@ pub enum RunRequest {
         /// Where a save writes, when given.
         path: Option<std::path::PathBuf>,
     },
+    /// Open or save the newest image or audio clip the model or a tool
+    /// produced (`/media`).
+    Media {
+        /// What to do with the media.
+        action: kage_core::protocol::ImageAction,
+        /// Where a save writes, when given.
+        path: Option<std::path::PathBuf>,
+    },
     /// Advance the active thinking level one step forward (the
     /// `Shift+Tab` cycle). The worker mutates the agent context's
     /// `thinking_level`, persists the change as a session entry, and

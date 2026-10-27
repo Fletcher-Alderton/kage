@@ -587,6 +587,33 @@ fn image_opens_by_default_and_saves_to_a_parsed_path() {
 }
 
 #[test]
+fn media_opens_by_default_and_saves_to_a_parsed_path() {
+    use kage_core::protocol::ImageAction;
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    for (line, want_action, want_path) in [
+        ("media", ImageAction::Open, None),
+        ("media open", ImageAction::Open, None),
+        ("media save", ImageAction::Save, None),
+        (
+            "media save \"a b/c.mp3\"",
+            ImageAction::Save,
+            Some(std::path::PathBuf::from("a b/c.mp3")),
+        ),
+    ] {
+        let res = app.run_command_validated(line, &builtin_registry());
+        assert!(matches!(res, CommandResult::Done(None)), "{line}");
+        match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+            RunRequest::Media { action, path } => {
+                assert_eq!((action, path), (want_action, want_path), "{line}");
+            }
+            other => panic!("{line}: expected Media, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn slash_missing_argument_restores_the_draft_with_the_reason() {
     let mut app = defaults_app();
     app.set_toasts(crate::toast::shared_toasts());

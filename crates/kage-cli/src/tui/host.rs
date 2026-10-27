@@ -330,6 +330,11 @@ impl Host {
                 sha256: None,
                 path,
             }),
+            RunRequest::Media { action, path } => self.send(CommandKind::Media {
+                action,
+                sha256: None,
+                path,
+            }),
             RunRequest::ForkSessionFile(path) => self.send(CommandKind::ForkFile { path }),
             RunRequest::DeleteSession(path) => self.send(CommandKind::DeleteSession { path }),
             RunRequest::ResumeSession(path) => {

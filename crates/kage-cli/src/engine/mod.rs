@@ -899,6 +899,11 @@ impl Dispatcher {
                 sha256,
                 path,
             } => self.image(id, action, sha256.as_deref(), path.as_deref()),
+            CommandKind::Media {
+                action,
+                sha256,
+                path,
+            } => self.media(id, action, sha256.as_deref(), path.as_deref()),
             CommandKind::SetModel { model } => self.set_model(id, &model),
             CommandKind::SetThinking { level } => self.set_thinking(id, level),
             CommandKind::SetPermissionMode { mode } => self.update_state(id, |s| {

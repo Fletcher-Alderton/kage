@@ -574,11 +574,12 @@ impl Command {
     }
 }
 
-/// What [`CommandKind::Image`] does with the image.
+/// What [`CommandKind::Image`] and [`CommandKind::Media`] do with the
+/// media.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageAction {
-    /// Show it in the system's image viewer.
+    /// Show it in the system's viewer or player.
     Open,
     /// Write it into the working directory.
     Save,
@@ -712,6 +713,21 @@ pub enum CommandKind {
         /// What to do with it.
         action: ImageAction,
         /// The sha256 of the image's bytes, lowercase hex.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+        /// Where `save` writes. `None` picks a new file under
+        /// `generated/` in the working directory. An existing file is
+        /// never replaced.
+        #[serde(default)]
+        path: Option<PathBuf>,
+    },
+    /// Open or save media the model or a tool produced in the session,
+    /// an image or an audio clip: the one whose bytes hash to
+    /// `sha256`, else the newest.
+    Media {
+        /// What to do with it.
+        action: ImageAction,
+        /// The sha256 of the media's bytes, lowercase hex.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sha256: Option<String>,
         /// Where `save` writes. `None` picks a new file under
@@ -1244,6 +1260,11 @@ mod tests {
                 action: ImageAction::Save,
                 sha256: Some("ab".repeat(32)),
                 path: Some(PathBuf::from("art/cat.png")),
+            },
+            CommandKind::Media {
+                action: ImageAction::Open,
+                sha256: Some("cd".repeat(32)),
+                path: None,
             },
             CommandKind::RestartMcp {
                 server: "srv".into(),

@@ -563,6 +563,34 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         ],
     },
     CommandSpec {
+        name: "media",
+        aliases: &[],
+        description: "open or save the newest image or audio clip the model produced",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[
+            CommandSpec {
+                name: "open",
+                aliases: &[],
+                description: "show or play it with the system viewer",
+                category: CommandCategory::Both,
+                args: &[],
+                subcommands: &[],
+            },
+            CommandSpec {
+                name: "save",
+                aliases: &[],
+                description: "write it into the workspace, under generated/ by default",
+                category: CommandCategory::Both,
+                args: &[ArgSpec::Path {
+                    name: "file",
+                    optional: true,
+                }],
+                subcommands: &[],
+            },
+        ],
+    },
+    CommandSpec {
         name: "tree",
         aliases: &[],
         description: "browse the session fork forest (resume, fork, delete)",
@@ -797,7 +825,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 32);
+        assert_eq!(BUILTIN_COMMANDS.len(), 33);
     }
 
     #[test]
