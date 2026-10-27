@@ -240,8 +240,8 @@ pub struct ToolResultParts<'a> {
     pub is_error: bool,
     /// The images the tool produced, as `(source, mime)`.
     pub media: Vec<(&'a MediaSource, &'a str)>,
-    /// The mimes of the audio clips the tool produced.
-    pub audio: Vec<&'a str>,
+    /// The audio clips the tool produced, as `(source, mime)`.
+    pub audio: Vec<(&'a MediaSource, &'a str)>,
 }
 
 impl ToolResultParts<'_> {
@@ -257,7 +257,7 @@ impl ToolResultParts<'_> {
                 "\n[the tool produced an image ({mime}), not shown here]"
             );
         }
-        for mime in &self.audio {
+        for (_, mime) in &self.audio {
             let _ = write!(text, "\n{}", Content::audio_note(mime));
         }
         text
@@ -287,9 +287,9 @@ pub fn tool_results(blocks: &[Content]) -> Vec<ToolResultParts<'_>> {
                     last.media.push((source, mime));
                 }
             }
-            Content::Audio { mime, .. } => {
+            Content::Audio { source, mime } => {
                 if let Some(last) = out.last_mut() {
-                    last.audio.push(mime);
+                    last.audio.push((source, mime));
                 }
             }
             _ => {}

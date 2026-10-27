@@ -393,7 +393,7 @@ fn convert_tool_result_blocks(blocks: &[Content]) -> Vec<Value> {
                 for (source, mime) in &result.media {
                     parts.push(image_to_anthropic(source, mime));
                 }
-                for mime in &result.audio {
+                for (_, mime) in &result.audio {
                     parts.push(serde_json::json!({
                         "type": "text",
                         "text": Content::audio_note(mime),

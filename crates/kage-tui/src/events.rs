@@ -182,6 +182,16 @@ fn produced_media_label(mime: &str, bytes: usize) -> String {
     )
 }
 
+/// The approximate byte count a media source names: its decoded
+/// base64 size, its blob size, or none for a URL.
+fn source_bytes(source: &MediaSource) -> usize {
+    match source {
+        MediaSource::Base64 { data } => data.len() / 4 * 3,
+        MediaSource::Blob { size, .. } => usize::try_from(*size).unwrap_or(0),
+        MediaSource::Url { .. } => 0,
+    }
+}
+
 /// One `kage:image` row per attached image, skipping an image the
 /// bubble's resource block already named. Shared by the live prompt
 /// path and the resume replay so both show attached images.
@@ -426,16 +436,11 @@ fn push_replayed_message(buf: &mut Buffer, msg: &Arc<Message>, tool_durations: &
                     Content::ToolCall { id, name, input } => {
                         buf.push_tool_call(id.to_string(), name, input.clone());
                     }
-                    Content::Image { source, mime } => {
-                        let bytes = match source {
-                            MediaSource::Base64 { data } => data.len() / 4 * 3,
-                            MediaSource::Blob { size, .. } => usize::try_from(*size).unwrap_or(0),
-                            MediaSource::Url { .. } => 0,
-                        };
+                    Content::Image { source, mime } | Content::Audio { source, mime } => {
+                        let bytes = source_bytes(source);
                         buf.push_custom("kage:image", produced_media_label(mime, bytes), false);
                     }
                     Content::Thinking { .. }
-                    | Content::Audio { .. }
                     | Content::ToolResultBlock { .. }
                     | Content::Custom { .. } => {}
                 }
@@ -461,12 +466,8 @@ fn push_replayed_message(buf: &mut Buffer, msg: &Arc<Message>, tool_durations: &
                         duration,
                     );
                 }
-                if let Content::Image { source, mime } = block {
-                    let bytes = match source {
-                        MediaSource::Base64 { data } => data.len() / 4 * 3,
-                        MediaSource::Blob { size, .. } => usize::try_from(*size).unwrap_or(0),
-                        MediaSource::Url { .. } => 0,
-                    };
+                if let Content::Image { source, mime } | Content::Audio { source, mime } = block {
+                    let bytes = source_bytes(source);
                     buf.push_custom("kage:image", tool_media_label(mime, bytes), false);
                 }
             }
@@ -667,6 +668,86 @@ mod tests {
         assert!(
             matches!(last.as_ref(), Block::Custom { kind, text, .. }
                 if kind == "kage:image" && text.contains("image/png from the tool")),
+            "{last:?}"
+        );
+    }
+
+    #[test]
+    fn a_produced_audio_shows_on_replay() {
+        let mut buf = Buffer::new();
+        let message = std::sync::Arc::new(Message::new(
+            Role::Assistant,
+            vec![
+                Content::Audio {
+                    source: MediaSource::Base64 {
+                        data: "A".repeat(4000),
+                    },
+                    mime: "audio/mpeg".into(),
+                },
+                Content::Audio {
+                    source: MediaSource::Blob {
+                        sha256: "0".repeat(64),
+                        size: 3000,
+                    },
+                    mime: "audio/mpeg".into(),
+                },
+            ],
+            None,
+        ));
+        push_replayed_message(&mut buf, &message, &ToolDurations::default());
+        let rows: Vec<_> = buf
+            .blocks()
+            .iter()
+            .filter_map(|block| match block.as_ref() {
+                Block::Custom { kind, text, .. } if kind == "kage:image" => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                format!(
+                    "[audio/mpeg from the model, {}]",
+                    crate::image::human_bytes(3000)
+                ),
+                format!(
+                    "[audio/mpeg from the model, {}]",
+                    crate::image::human_bytes(3000)
+                ),
+            ],
+            "a blob source counts its stored bytes"
+        );
+    }
+
+    #[test]
+    fn a_tool_s_audio_shows_after_its_result() {
+        let mut buf = Buffer::new();
+        let message = std::sync::Arc::new(Message::new(
+            Role::ToolResult,
+            vec![
+                Content::ToolResultBlock {
+                    call_id: ToolCallId::new("speak"),
+                    output: "spoken".into(),
+                    is_error: false,
+                },
+                Content::Audio {
+                    source: MediaSource::Base64 {
+                        data: "A".repeat(4000),
+                    },
+                    mime: "audio/mpeg".into(),
+                },
+            ],
+            None,
+        ));
+        push_replayed_message(&mut buf, &message, &ToolDurations::default());
+        let last = buf.blocks().last().cloned().unwrap();
+        assert!(
+            matches!(last.as_ref(), Block::Custom { kind, text, .. }
+            if kind == "kage:image"
+                && *text == format!(
+                    "[audio/mpeg from the tool, {}]",
+                    crate::image::human_bytes(3000)
+                )),
             "{last:?}"
         );
     }
