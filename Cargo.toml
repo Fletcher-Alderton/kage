@@ -21,7 +21,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89"
 readme = "README.md"
@@ -32,20 +32,20 @@ keywords = ["agent", "ai", "llm", "lua", "tui"]
 categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
-kage-acp = { path = "crates/kage-acp", version = "0.5.1" }
-kage-acp-wire = { path = "crates/kage-acp-wire", version = "0.5.1" }
-kage-client = { path = "crates/kage-client", version = "0.5.1" }
-kage-core = { path = "crates/kage-core", version = "0.5.1" }
-kage-jsonrpc = { path = "crates/kage-jsonrpc", version = "0.5.1" }
-kage-kura = { path = "crates/kage-kura", version = "0.5.1" }
-kage-loop = { path = "crates/kage-loop", version = "0.5.1" }
-kage-mcp = { path = "crates/kage-mcp", version = "0.5.1" }
-kage-plugin = { path = "crates/kage-plugin", version = "0.5.1" }
-kage-provider = { path = "crates/kage-provider", version = "0.5.1" }
-kage-remote = { path = "crates/kage-remote", version = "0.5.1" }
-kage-session = { path = "crates/kage-session", version = "0.5.1" }
-kage-tools = { path = "crates/kage-tools", version = "0.5.1" }
-kage-tui = { path = "crates/kage-tui", version = "0.5.1" }
+kage-acp = { path = "crates/kage-acp", version = "0.6.0" }
+kage-acp-wire = { path = "crates/kage-acp-wire", version = "0.6.0" }
+kage-client = { path = "crates/kage-client", version = "0.6.0" }
+kage-core = { path = "crates/kage-core", version = "0.6.0" }
+kage-jsonrpc = { path = "crates/kage-jsonrpc", version = "0.6.0" }
+kage-kura = { path = "crates/kage-kura", version = "0.6.0" }
+kage-loop = { path = "crates/kage-loop", version = "0.6.0" }
+kage-mcp = { path = "crates/kage-mcp", version = "0.6.0" }
+kage-plugin = { path = "crates/kage-plugin", version = "0.6.0" }
+kage-provider = { path = "crates/kage-provider", version = "0.6.0" }
+kage-remote = { path = "crates/kage-remote", version = "0.6.0" }
+kage-session = { path = "crates/kage-session", version = "0.6.0" }
+kage-tools = { path = "crates/kage-tools", version = "0.6.0" }
+kage-tui = { path = "crates/kage-tui", version = "0.6.0" }
 
 aes-gcm = "0.11.1"
 base64 = "0.23.1"

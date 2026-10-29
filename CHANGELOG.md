@@ -1,4 +1,52 @@
 # Changelog
+## [0.6.0](https://github.com/QaidVoid/kage/compare/v0.5.1...v0.6.0) - 2026-10-29
+
+### Features
+
+- *(acp)* Keep the audio a user attaches or an MCP prompt holds - ([7754e67](https://github.com/QaidVoid/kage/commit/7754e67e0952252d50ac88cc50a7977fb133677b))
+- *(auth)* Add ChatGPT sign-in for the OpenAI provider ([#268](https://github.com/QaidVoid/kage/pull/268)) - ([43d628c](https://github.com/QaidVoid/kage/commit/43d628c7d618a5c5cb15c02bc26c2c05565732a6))
+- *(cli)* Show the media tools in auth login and auth list - ([d18b12d](https://github.com/QaidVoid/kage/commit/d18b12de15eb410091dea90c7c4226ae49817d3e))
+- *(cli)* Add /media to open or save produced media - ([38128c7](https://github.com/QaidVoid/kage/commit/38128c721aee933ace5ef7053e0d3d903e0a0044))
+- *(cli)* Replay kept audio to clients - ([56b8eed](https://github.com/QaidVoid/kage/commit/56b8eedfb81e484ff24795223baeed24393fa8c2))
+- *(cli)* List the provider ids kage knows with kage providers ([#270](https://github.com/QaidVoid/kage/pull/270)) - ([326c0a6](https://github.com/QaidVoid/kage/commit/326c0a6d885e2584fdcfb3de18f578a18c9e76c3))
+- *(core)* Keep audio blocks in sessions - ([36c5ed3](https://github.com/QaidVoid/kage/commit/36c5ed343b1213aa102321763fdfa15dd525a9f3))
+- *(desktop)* Play and save the clips in the transcript - ([0dbd78f](https://github.com/QaidVoid/kage/commit/0dbd78f0ddca171c3467b3d32dcda9e71caced6c))
+- *(loop)* Keep tool and model audio in history - ([ed6ecba](https://github.com/QaidVoid/kage/commit/ed6ecba554c741f13c5dc2e6745586c4827470cc))
+- *(loop)* Hand tools the conversation so far - ([8cbf9be](https://github.com/QaidVoid/kage/commit/8cbf9bea18ad6b4a4992bcf7b884f1a89b328231))
+- *(provider)* Send the user's audio to models that hear it - ([b5baaec](https://github.com/QaidVoid/kage/commit/b5baaecea7281739d81b0a23dfc5b79d038eec88))
+- *(provider)* Fetch an image link on the media endpoint's origin - ([a1f998d](https://github.com/QaidVoid/kage/commit/a1f998de969cff5dd69a8e164b8447a53f5ee2ab))
+- *(tools)* Add generate_music for songs from a prompt and lyrics - ([c13cf12](https://github.com/QaidVoid/kage/commit/c13cf12bb5c3d8d770eb2d28076c0eeecd85d9cb))
+- *(tools)* Save a speech clip only when the call names a path - ([f63e1ab](https://github.com/QaidVoid/kage/commit/f63e1abb8bd95b620b17367ad76db4046fc156ea))
+- *(tools)* Let edit_image edit the conversation's newest image - ([a9fa023](https://github.com/QaidVoid/kage/commit/a9fa0235c383ff7cb6b2dbd8ef8e7f8424104f2f))
+- *(tools)* Add generate_speech for OpenAI-compatible speech APIs - ([5babbac](https://github.com/QaidVoid/kage/commit/5babbacbc724ea1e625f08c9ed82046c298bf63d))
+- *(tools)* Add edit_image for OpenAI-compatible image endpoints - ([18c96e8](https://github.com/QaidVoid/kage/commit/18c96e8ad7c6b10b953c8e14bb6fbed808f5a5d3))
+- *(tools)* Let the read tool attach images to its result - ([d8d3eed](https://github.com/QaidVoid/kage/commit/d8d3eeddc8c8f0a0ef89324ea5179c6a2b623ad1))
+
+### Bug Fixes
+
+- *(anthropic)* Keep the thinking budget under max_tokens - ([4722c5b](https://github.com/QaidVoid/kage/commit/4722c5b74fb223f032d922d95e95880319ff5f95))
+- *(cli)* Keep a media result when saving its file fails - ([7c102ed](https://github.com/QaidVoid/kage/commit/7c102ed04005fd3c0005119476faa32609ca69af))
+- *(cli)* Refuse the workspace root as a media save path - ([91e115d](https://github.com/QaidVoid/kage/commit/91e115d8a3084f1c0054e65193eb1c5230494f27))
+- *(cli)* Stop media tool retries on 403, 410 and long waits - ([588f2aa](https://github.com/QaidVoid/kage/commit/588f2aa08b61763652f14d5fc28626457effe98f))
+- *(loop)* Fit the output ceiling into the context window - ([b2b8c34](https://github.com/QaidVoid/kage/commit/b2b8c34ae47a43d6a8d1749f7f32e2dcda821dba))
+- *(provider)* Retry a stream the upstream interrupted - ([f6abb0f](https://github.com/QaidVoid/kage/commit/f6abb0f3f583c36ef52dfcb8fcd3ed022cd7b44f))
+- *(provider)* Let cancel stop reading a media refusal - ([3206828](https://github.com/QaidVoid/kage/commit/3206828688a54529d08fcf4f83d366c99c57cdf4))
+- *(provider)* Match retry fields on the error, not the whole body - ([d281500](https://github.com/QaidVoid/kage/commit/d2815007e2bfd021ffeb36be122237b59e183ca1))
+- *(provider)* Refuse redirects and oversized linked images - ([f034a6c](https://github.com/QaidVoid/kage/commit/f034a6c03e62058683979823ee766cfce4b036e6))
+- *(tools)* Remember a refused response_format in generate_image - ([9f35b98](https://github.com/QaidVoid/kage/commit/9f35b9846384618c5931952ad1157563d4e4fa78))
+- *(tui)* Make the new output mark clickable to jump to bottom - ([8ec5740](https://github.com/QaidVoid/kage/commit/8ec5740ab232b19086b934441039a9cd2017fc03))
+- Build on Rust 1.89 and pass the tests on Windows - ([1e6074f](https://github.com/QaidVoid/kage/commit/1e6074fb0d197e51651886043677c1380752134d))
+- Refresh the model identity after a model switch ([#269](https://github.com/QaidVoid/kage/pull/269)) - ([ca25493](https://github.com/QaidVoid/kage/commit/ca25493aa853f5057ffba7158d45b5860d5bd73f))
+
+### Refactor
+
+- *(cli)* Share endpoint and save helpers across media tools - ([2e916f8](https://github.com/QaidVoid/kage/commit/2e916f8c84d56ace5f8f61c4788a17053cf60c74))
+- *(provider)* Share the media endpoint and call helpers - ([ca875b0](https://github.com/QaidVoid/kage/commit/ca875b0331f15fbb86bc42f9628b93726dfaef9d))
+
+### Testing
+
+- *(cli)* Share one test server across the media tools - ([8ab3ad8](https://github.com/QaidVoid/kage/commit/8ab3ad8f3c7393b7932a2e01d9bff2c53e5be874))
+
 ## [0.5.1](https://github.com/QaidVoid/kage/compare/v0.5.0...v0.5.1) - 2026-10-24
 
 ### Features
