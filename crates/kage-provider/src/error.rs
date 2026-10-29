@@ -121,8 +121,9 @@ impl ProviderError {
 
     /// Classify an in-band provider error event (kind + message) so a
     /// mid-stream failure gets the same retryability treatment as the
-    /// equivalent HTTP status: rate limits and 5xx-class kinds are
-    /// transient, everything else stays a permanent decode failure.
+    /// equivalent HTTP status: rate limits, 5xx-class kinds, and a stream
+    /// the upstream cut off are transient, everything else stays a
+    /// permanent decode failure.
     pub(crate) fn from_stream_error(kind: &str, message: &str) -> Self {
         let kind = kind.trim().to_ascii_lowercase();
         if kind.contains("rate_limit") || kind.contains("resource_exhausted") || kind == "429" {
@@ -136,6 +137,7 @@ impl ProviderError {
             || kind.contains("unavailable")
             || kind.contains("internal")
             || kind.contains("deadline_exceeded")
+            || kind.contains("interrupted")
             || kind == "api_error"
             || kind
                 .parse::<u16>()
@@ -359,6 +361,7 @@ mod tests {
             "UNAVAILABLE",
             "INTERNAL",
             "DEADLINE_EXCEEDED",
+            "stream_interrupted",
             "500",
             "503",
         ] {
