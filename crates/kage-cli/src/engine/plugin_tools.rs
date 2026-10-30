@@ -15,12 +15,27 @@ pub(super) struct PluginTools {
     renames: Vec<(String, String)>,
 }
 
+/// A `kage.override_tool` that replaced nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct OverrideMiss {
+    /// The tool name the plugin asked to override.
+    pub(super) name: String,
+    /// `true` when the tool exists but `[tools.<name>] enabled = false`
+    /// dropped it, `false` when no tool carries that name at all.
+    pub(super) disabled: bool,
+}
+
 impl PluginTools {
     /// Remove the previous plugin tools and renames from `tools`,
     /// restore what they displaced, then register what `rt` registers
-    /// now and re-apply its renames. Returns the names of overrides
-    /// that matched no existing tool.
-    pub(super) fn apply(&mut self, tools: &mut ToolRegistry, rt: &PluginRuntime) -> Vec<String> {
+    /// now and re-apply its renames. Returns the overrides that matched
+    /// no live tool, so the caller can tell a disabled tool from a name
+    /// nothing ever registered.
+    pub(super) fn apply(
+        &mut self,
+        tools: &mut ToolRegistry,
+        rt: &PluginRuntime,
+    ) -> Vec<OverrideMiss> {
         for name in self.names.drain(..) {
             tools.unregister(&name);
         }
@@ -35,10 +50,18 @@ impl PluginTools {
         }
         let mut unmatched = Vec::new();
         for tool in rt.registered_tool_overrides() {
-            if tools.get(tool.name()).is_none() {
-                unmatched.push(tool.name().to_owned());
+            let name = tool.name().to_owned();
+            if tools.get(&name).is_none() {
+                unmatched.push(OverrideMiss {
+                    disabled: tools.was_registered(&name),
+                    name: name.clone(),
+                });
             }
             self.add(tools, tool);
+            // The plugin's description matches the code now running, so
+            // it replaces a `[tools.<name>] description` written for the
+            // tool this override displaced.
+            tools.clear_description(&name);
         }
         self.renames = rt.registered_renames();
         for (from, to) in &self.renames {
@@ -144,6 +167,33 @@ mod tests {
         assert!(tools.get("renamed").is_none());
     }
 
+    /// A tool disabled by `[tools.<name>]` is reported as disabled, not
+    /// as a name nothing ever registered.
+    #[test]
+    fn an_override_of_a_disabled_tool_is_reported_as_disabled() {
+        let mut tools = kage_tools::builtin_registry().with_overrides(
+            kage_tools::ToolOverrides::from_config(&kage_core::config::ToolsConfig {
+                shell: kage_core::config::ShellToolConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        );
+        let rt = runtime(
+            "kage.override_tool({ name = 'shell', description = 'd', \
+             schema = { type = 'object' }, execute = function() return 'x' end })",
+        );
+        let misses = PluginTools::default().apply(&mut tools, &rt);
+        assert_eq!(
+            misses,
+            [OverrideMiss {
+                name: "shell".to_owned(),
+                disabled: true,
+            }]
+        );
+    }
+
     #[test]
     fn overrides_without_a_target_are_reported() {
         let mut tools = ToolRegistry::new();
@@ -151,6 +201,13 @@ mod tests {
             "kage.override_tool({ name = 'ghost', description = 'd', \
              schema = { type = 'object' }, execute = function() return 'x' end })",
         );
-        assert_eq!(PluginTools::default().apply(&mut tools, &rt), ["ghost"]);
+        let misses = PluginTools::default().apply(&mut tools, &rt);
+        assert_eq!(
+            misses,
+            [OverrideMiss {
+                name: "ghost".to_owned(),
+                disabled: false,
+            }]
+        );
     }
 }

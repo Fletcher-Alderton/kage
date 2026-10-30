@@ -11,7 +11,7 @@ use kage_tools::{Tool, ToolRegistry};
 
 use super::bus::Bus;
 use super::runner::Work;
-use super::{Idle, Input, notice, record_late_title, settle_working};
+use super::{Idle, Input, notice, record_late_title, settle_working, warn_unmatched};
 
 /// The manager back from MCP maintenance off the dispatcher, with the
 /// tool changes to apply to the session's registry.
@@ -77,6 +77,7 @@ impl super::Dispatcher {
     /// [`Self::mcp_done`] gives it back, so a prompt submitted while
     /// servers connect runs once they are up.
     pub(super) fn start_mcp(&mut self, id: SessionId) {
+        let bus = Arc::clone(&self.bus);
         let session = self.sessions.get_mut(&id).expect("session checked");
         let Some(mut manager) = session.mcp.take() else {
             return;
@@ -84,6 +85,8 @@ impl super::Dispatcher {
         let names: Vec<String> = manager.starting_names().map(str::to_owned).collect();
         if names.is_empty() {
             session.mcp = Some(manager);
+            // Nothing left to register, so the registry is final.
+            warn_unmatched(&bus, id, session.tools.unmatched_overrides());
             return;
         }
         let idle = session.idle.take();
@@ -154,6 +157,10 @@ impl super::Dispatcher {
         };
         tools.apply(&mut session.tools);
         session.mcp = Some(manager);
+        // Every server has registered, so a `[tools.<name>]` table that
+        // still matches nothing is a typo.
+        let unmatched = session.tools.unmatched_overrides();
+        warn_unmatched(&self.bus, id, unmatched);
         let Some(idle) = idle else {
             return;
         };

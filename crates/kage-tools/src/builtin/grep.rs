@@ -18,10 +18,6 @@ use crate::{Tool, ToolContext, ToolError, schema_for};
 /// Characters of context kept before the match in a cut line.
 const LEAD_CHARS: usize = 100;
 
-/// The `max_matches` doc as derived, before a configured default
-/// replaces its number.
-pub(super) const DEFAULT_MATCHES_DOC: &str = "Defaults to 1000.";
-
 /// Input shape for the `grep` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GrepInput {
@@ -83,11 +79,13 @@ impl Tool for GrepTool {
 
     fn schema(&self) -> serde_json::Value {
         let mut schema = schema_for::<GrepInput>();
-        crate::schema::retarget_property_doc(
+        crate::schema::set_property_doc(
             &mut schema,
             "max_matches",
-            DEFAULT_MATCHES_DOC,
-            &format!("Defaults to {}.", self.max_matches),
+            &format!(
+                "Cap on total matches across all files. Defaults to {}.",
+                self.max_matches
+            ),
         );
         schema
     }

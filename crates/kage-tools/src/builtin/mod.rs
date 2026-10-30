@@ -24,7 +24,7 @@ pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use write::WriteTool;
 
-use kage_core::config::{ShellConfig, ToolsConfig, WebSearchConfig};
+use kage_core::config::{ShellConfig, ToolsConfig};
 
 use crate::ToolRegistry;
 use crate::registry::ToolOverrides;
@@ -103,34 +103,6 @@ impl ToolRegistry {
     #[must_use]
     pub fn with_todo_list(mut self, todos: TodoList) -> Self {
         self.register(Arc::new(TodoListTool::new(todos)));
-        self
-    }
-
-    /// Replace the registered `web_search` tool with one asking the
-    /// engine `cfg` names. The default config leaves the registry
-    /// unchanged. [`configured_registry`] applies the whole `[tools]`
-    /// table at once.
-    #[must_use]
-    pub fn with_web_search(mut self, cfg: &WebSearchConfig) -> Self {
-        if !cfg.is_default() {
-            self.register(Arc::new(WebSearchTool::new(cfg.clone())));
-        }
-        self
-    }
-
-    /// Replace the registered `shell` tool with one running commands via
-    /// `cfg.shell` (default `bash`, see [`ShellTool::with_shell`]) and
-    /// stripping environment variables matched by `cfg.scrub_env` (see
-    /// [`ShellTool::with_env_scrub`]). A fully default `cfg` leaves the
-    /// registry unchanged.
-    #[must_use]
-    pub fn with_shell_config(mut self, cfg: &ShellConfig) -> Self {
-        if cfg.program.is_some() || !cfg.scrub_env.is_empty() {
-            let tool = ShellTool::default()
-                .with_env_scrub(&cfg.scrub_env)
-                .with_shell(cfg.program.as_deref());
-            self.register(Arc::new(tool));
-        }
         self
     }
 }
@@ -239,26 +211,31 @@ mod tests {
         );
     }
 
-    /// A configured limit rewrites the number in the derived schema
-    /// doc. If a doc comment is reworded, the anchor no longer matches
-    /// and the rewrite silently does nothing, so pin the anchors to the
-    /// derived text.
+    /// A configured limit is written into the schema the model reads.
+    /// The description is set outright rather than rewritten inside the
+    /// derived doc comment, so a reworded comment cannot turn it into a
+    /// silent no-op.
     #[test]
-    fn schema_doc_anchors_match_the_derived_docs() {
-        let r = builtin_registry();
-        for (tool, key, anchor) in [
-            ("web_fetch", "max_bytes", web_fetch::DEFAULT_MAX_BYTES_DOC),
-            ("shell", "timeout_ms", shell::DEFAULT_TIMEOUT_DOC),
-            ("web_search", "count", web_search::DEFAULT_COUNT_DOC),
-            ("grep", "max_matches", grep::DEFAULT_MATCHES_DOC),
+    fn a_configured_limit_reaches_the_schema_doc() {
+        let r = configured(
+            "[web_fetch]\nmax_bytes = 1000\nmax_bytes_limit = 4000\n\
+             [shell]\ntimeout_ms = 5000\n\
+             [web_search]\ncount = 3\nmax_count = 7\n\
+             [grep]\nmax_matches = 42\n",
+        );
+        for (tool, key, needle) in [
+            ("web_fetch", "max_bytes", "hard-capped at 4,000"),
+            ("shell", "timeout_ms", "Defaults to 5000"),
+            ("web_search", "count", "Defaults to 3, at most 7"),
+            ("grep", "max_matches", "Defaults to 42"),
         ] {
             let doc = spec(&r, tool).schema["properties"][key]["description"]
                 .as_str()
                 .unwrap_or_default()
                 .to_owned();
             assert!(
-                doc.contains(anchor),
-                "{tool}.{key}: {doc:?} lacks {anchor:?}"
+                doc.contains(needle),
+                "{tool}.{key}: {doc:?} lacks {needle:?}"
             );
         }
     }
@@ -334,7 +311,7 @@ mod tests {
             fetch.schema["properties"]["max_bytes"]["description"]
                 .as_str()
                 .unwrap()
-                .contains("Defaults to 1,000,000 and is\nhard-capped at 3,000,000.")
+                .contains("Defaults to 1,000,000 and is hard-capped at 3,000,000.")
         );
         let search = spec(&r, "web_search");
         assert!(

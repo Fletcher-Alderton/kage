@@ -19,11 +19,6 @@ use serde::Deserialize;
 use crate::ssrf;
 use crate::{Tool, ToolContext, ToolError, schema_for};
 
-/// The `max_bytes` doc as derived, before configured limits replace
-/// its numbers.
-pub(super) const DEFAULT_MAX_BYTES_DOC: &str =
-    "Defaults to 2,000,000 and is\nhard-capped at 5,000,000.";
-
 /// Input shape for the `web_fetch` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WebFetchInput {
@@ -102,12 +97,11 @@ impl Tool for WebFetchTool {
 
     fn schema(&self) -> serde_json::Value {
         let mut schema = schema_for::<WebFetchInput>();
-        crate::schema::retarget_property_doc(
+        crate::schema::set_property_doc(
             &mut schema,
             "max_bytes",
-            DEFAULT_MAX_BYTES_DOC,
             &format!(
-                "Defaults to {} and is\nhard-capped at {}.",
+                "Cap on response body bytes read. Defaults to {} and is hard-capped at {}.",
                 grouped(self.max_bytes),
                 grouped(self.max_bytes_limit)
             ),

@@ -665,7 +665,12 @@ fn reload_connection(
 }
 
 /// Register discovered tools, skipping the `disabled` ones, and track
-/// the registered names.
+/// the names the registry actually took.
+///
+/// `[tools.<server>__<tool>] enabled = false` makes `register` drop a
+/// tool, so a name is only tracked once the registry holds it. Tracking
+/// a dropped one would make the next reload unregister a tool that was
+/// never there and leave the manager believing a disabled tool is live.
 fn register_tools(
     tools: &[Arc<dyn kage_tools::Tool>],
     conn: &Arc<McpConnection>,
@@ -674,14 +679,20 @@ fn register_tools(
     reg: &mut ToolRegistry,
 ) {
     for tool in tools {
+        let name = tool.name();
         if disabled
             .iter()
-            .any(|name| tool.name() == format!("{}__{name}", conn.name()))
+            .any(|dropped| name == format!("{}__{dropped}", conn.name()))
         {
             continue;
         }
-        registered.push(tool.name().to_owned());
+        // `register` records the name even when the overrides drop it,
+        // so a `[tools.<server>__<tool>]` table is not later reported as
+        // naming no tool. Only a name the registry holds is tracked.
         reg.register(Arc::clone(tool));
+        if reg.get(name).is_some() {
+            registered.push(name.to_owned());
+        }
     }
 }
 

@@ -238,7 +238,9 @@ enabled = false          # MCP tools are `<server>__<tool>`
 
 The built-in tools also take their limits. The tool's description and
 input schema state the value in effect, so the model sees your limit,
-not the default.
+not the default. `[tools.web_search] max_count` above 20 is honoured for
+DuckDuckGo and SearXNG, but Brave's API documents `count` as max 20, so
+a Brave search is clamped to 20 whatever the config says.
 
 | Table | Key | Default | What it bounds |
 | --- | --- | --- | --- |
@@ -259,16 +261,30 @@ not the default.
 | | `timeout_ms` | 20000 | whole-request timeout |
 
 The shell program and the environment scrub stay in `[shell]`.
-Every value can also come from the environment, such as
-`KAGE_TOOLS__SHELL__TIMEOUT_MS=300000` or
+Every value in a typed table can also come from the environment, such
+as `KAGE_TOOLS__SHELL__TIMEOUT_MS=300000` or
 `KAGE_TOOLS__WEB_FETCH__ENABLED=false`.
 
+An MCP tool's `<server>__<tool>` table is the exception: it is TOML
+only. The environment provider splits variable names on `__`, so
+`KAGE_TOOLS__GITHUB__DELETE_REPOSITORY__ENABLED=false` would arrive as
+`tools.github.delete_repository.enabled`, a table no tool reads. kage
+refuses to start on it rather than leaving the tool enabled, so write
+the table in the config file.
+
+A `[tools.<name>]` table takes `enabled` and `description` and nothing
+else. Any other key is refused, so a disable meant for safety cannot
+quietly do nothing because it was spelled `[tools.web-search]` or
+`[tools.Shell]`: a name that matches no tool is reported as a warning
+once the registry is built.
+
 kage refuses to start on a value no tool could use: an empty
-`description`, a zero limit, a `max_bytes` above `max_bytes_limit`, or
-a `count` above `max_count`. Disabling `exit_plan` leaves plan mode
-with no way out but `/plan`, and disabling `todo_list`, `agent` or
-`swarm` takes those features away from the model, so do that on
-purpose. `kage mcp serve --tools` refuses a tool you disabled.
+`description`, a zero limit, a `max_bytes` above `max_bytes_limit`, a
+`max_bytes` above 1 GiB, or a `count` above `max_count`. Disabling
+`exit_plan` leaves plan mode with no way out but `/plan`, and disabling
+`todo_list`, `agent` or `swarm` takes those features away from the
+model, so do that on purpose. `kage mcp serve --tools` refuses a tool
+you disabled, under its real name or a `[tools.rename]` one.
 
 To change what a tool does rather than what it is told, a plugin can
 replace it with `kage.override_tool` (see the plugin API).

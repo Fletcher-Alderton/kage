@@ -242,7 +242,9 @@ fn slice_file(
             }
             break;
         }
-        let gather = gather_line(&mut reader, path, &mut raw, budget + 1)?;
+        // `saturating_add` so a `[tools.read] max_bytes` at the very top
+        // of `usize` cannot overflow into a zero budget and empty reads.
+        let gather = gather_line(&mut reader, path, &mut raw, budget.saturating_add(1))?;
         if gather == Gather::Eof {
             reached_eof = true;
         }
@@ -659,7 +661,7 @@ mod tests {
         let line = "\u{1F600}".repeat(MAX_BYTES / 4 + 10);
         fs::write(dir.path().join("emoji.txt"), &line).unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"emoji.txt"}),
         )
@@ -681,7 +683,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let line = "\u{2022}".repeat(MAX_BYTES / 3 + 10);
         fs::write(dir.path().join("f.txt"), format!("a\n{line}")).unwrap();
-        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"f.txt"})).unwrap();
+        let out = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"f.txt"}),
+        )
+        .unwrap();
         assert!(out.text.contains("truncated"), "{}", &out.text[..100]);
         let body = out.text.split("\n\n[... truncated").next().unwrap();
         assert!(body.starts_with("a\n"), "{}", &body[..20]);
@@ -701,7 +708,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let body = format!("a\n{}\u{e9}y\n", "x".repeat(MAX_BYTES - 2));
         fs::write(dir.path().join("f.txt"), &body).unwrap();
-        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"f.txt"})).unwrap();
+        let out = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"f.txt"}),
+        )
+        .unwrap();
         assert!(out.text.contains("truncated"), "{}", &out.text[..100]);
         let shown = out.text.split("\n\n[... truncated").next().unwrap();
         assert_eq!(shown.len(), MAX_BYTES, "{}", shown.len());
@@ -714,7 +726,12 @@ mod tests {
     fn valid_utf8_ending_exactly_at_the_cap_is_truncated() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("big.txt"), "a".repeat(MAX_BYTES + 1)).unwrap();
-        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"big.txt"})).unwrap();
+        let out = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"big.txt"}),
+        )
+        .unwrap();
         assert!(out.text.contains("truncated"), "{}", &out.text[..100]);
         let body = out.text.split("\n\n[... truncated").next().unwrap();
         assert_eq!(body.len(), MAX_BYTES, "{}", body.len());
@@ -729,7 +746,12 @@ mod tests {
         bytes.extend_from_slice(&[0xff, 0xfe]);
         bytes.resize(bytes.len() + MAX_BYTES, b'y');
         fs::write(dir.path().join("bin.txt"), &bytes).unwrap();
-        let err = run(&ReadTool, dir.path(), serde_json::json!({"path":"bin.txt"})).unwrap_err();
+        let err = run(
+            &ReadTool::default(),
+            dir.path(),
+            serde_json::json!({"path":"bin.txt"}),
+        )
+        .unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
         assert!(err.to_string().contains("UTF-8"), "{err}");
     }
@@ -743,7 +765,7 @@ mod tests {
         bytes.extend_from_slice(&[0xf0, 0x9f, 0x98]);
         fs::write(dir.path().join("torn.txt"), &bytes).unwrap();
         let err = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"torn.txt"}),
         )
@@ -764,7 +786,7 @@ mod tests {
         assert_eq!(bytes.len(), MAX_BYTES + 1);
         fs::write(dir.path().join("torn.txt"), &bytes).unwrap();
         let out = run(
-            &ReadTool,
+            &ReadTool::default(),
             dir.path(),
             serde_json::json!({"path":"torn.txt"}),
         );

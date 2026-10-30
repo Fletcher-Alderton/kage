@@ -30,7 +30,7 @@ mod speech_tool;
 mod swarm_tool;
 mod worktree;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -797,15 +797,18 @@ impl Dispatcher {
         let Some(rt) = session.plugins.clone() else {
             return;
         };
-        for name in session.plugin_tools.apply(&mut session.tools, &rt) {
-            notice(
-                &self.bus,
-                id,
-                NoticeLevel::Warning,
+        for miss in session.plugin_tools.apply(&mut session.tools, &rt) {
+            let name = &miss.name;
+            let text = if miss.disabled {
+                format!(
+                    "override_tool: `{name}` is disabled by [tools.{name}] enabled = false; registered anyway"
+                )
+            } else {
                 format!(
                     "override_tool: no tool named `{name}` to override; treating as new registration"
-                ),
-            );
+                )
+            };
+            notice(&self.bus, id, NoticeLevel::Warning, text);
         }
     }
 
@@ -2055,6 +2058,21 @@ fn unresolvable_model_message(
         "no provider credentials found; add one with `kage auth login`, \
          an API-key env var, or the provider settings"
             .to_owned()
+    }
+}
+
+/// Warn once a session's registry is built about `[tools.<name>]`
+/// tables that name no tool: a typo or the wrong case would otherwise
+/// sit in the config doing nothing, and a disable meant for safety would
+/// silently not apply.
+fn warn_unmatched(bus: &Bus, id: SessionId, names: BTreeSet<String>) {
+    for name in names {
+        notice(
+            bus,
+            id,
+            NoticeLevel::Warning,
+            format!("[tools.{name}] matches no tool; ignoring it (check the name and its case)"),
+        );
     }
 }
 

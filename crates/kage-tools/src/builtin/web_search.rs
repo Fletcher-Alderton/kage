@@ -20,13 +20,13 @@ use crate::{Tool, ToolContext, ToolError, schema_for, ssrf};
 /// The variable the Brave Search key is read from by default.
 const BRAVE_KEY_ENV: &str = "BRAVE_API_KEY";
 
+/// The most results Brave's `count` parameter accepts. Its API documents
+/// 20 as the ceiling, and `[tools.web_search] max_count` does not bound
+/// it, so a call is clamped here whatever the config says.
+const BRAVE_MAX_COUNT: usize = 20;
+
 /// The largest answer page read.
 const MAX_BYTES: u64 = 2_000_000;
-
-/// Results returned when the model asks for no count, and at most.
-/// The `count` doc as derived, before configured limits replace its
-/// numbers.
-pub(super) const DEFAULT_COUNT_DOC: &str = "Defaults to 8, at most 20.";
 
 /// Input shape for the `web_search` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -61,6 +61,17 @@ impl WebSearchTool {
     pub fn new(config: WebSearchConfig) -> Self {
         Self { config }
     }
+
+    /// The most results a call may ask for: `[tools.web_search]
+    /// max_count`, but never above what the engine accepts. Brave
+    /// documents `count` as max 20, so a larger `max_count` would send a
+    /// value its API does not promise to honour.
+    fn max_count(&self) -> usize {
+        match self.config.engine {
+            SearchEngine::Brave => self.config.max_count.min(BRAVE_MAX_COUNT),
+            SearchEngine::Duckduckgo | SearchEngine::Searxng => self.config.max_count,
+        }
+    }
 }
 
 impl Tool for WebSearchTool {
@@ -75,13 +86,13 @@ impl Tool for WebSearchTool {
 
     fn schema(&self) -> serde_json::Value {
         let mut schema = schema_for::<WebSearchInput>();
-        crate::schema::retarget_property_doc(
+        crate::schema::set_property_doc(
             &mut schema,
             "count",
-            DEFAULT_COUNT_DOC,
             &format!(
-                "Defaults to {}, at most {}.",
-                self.config.count, self.config.max_count
+                "How many results to return. Defaults to {}, at most {}.",
+                self.config.count,
+                self.max_count()
             ),
         );
         schema
@@ -107,7 +118,7 @@ impl Tool for WebSearchTool {
         let count = input
             .count
             .unwrap_or(self.config.count)
-            .clamp(1, self.config.max_count.max(1));
+            .clamp(1, self.max_count().max(1));
         let timeout = Duration::from_millis(self.config.timeout_ms);
         let mut results = match self.config.engine {
             SearchEngine::Duckduckgo => duckduckgo(query, timeout)?,
@@ -435,6 +446,34 @@ mod tests {
             url.as_str(),
             "https://host/search?q=rust+engines&format=json"
         );
+    }
+
+    /// Brave documents `count` as max 20. `max_count` is not bounded by
+    /// `validate`, so a larger one must not reach the API, and the schema
+    /// the model reads must state the real ceiling.
+    #[test]
+    fn brave_count_never_exceeds_twenty() {
+        use crate::Tool as _;
+
+        let brave = super::WebSearchTool::new(kage_core::config::WebSearchConfig {
+            engine: kage_core::config::SearchEngine::Brave,
+            max_count: 50,
+            ..Default::default()
+        });
+        assert_eq!(brave.max_count(), 20);
+        let doc = brave.schema()["properties"]["count"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(doc.contains("at most 20"), "{doc}");
+
+        // Every other engine keeps the configured ceiling.
+        let searxng = super::WebSearchTool::new(kage_core::config::WebSearchConfig {
+            engine: kage_core::config::SearchEngine::Searxng,
+            max_count: 50,
+            ..Default::default()
+        });
+        assert_eq!(searxng.max_count(), 50);
     }
 
     #[test]

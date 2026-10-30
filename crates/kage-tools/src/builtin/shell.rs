@@ -24,10 +24,7 @@ pub const DEFAULT_SHELL: &str = "bash";
 #[cfg(not(unix))]
 pub const DEFAULT_SHELL: &str = "pwsh";
 /// The bytes [`run`] keeps of each stream.
-pub const MAX_STREAM_BYTES: usize = 100_000;
-/// The `timeout_ms` doc as derived, before a configured default
-/// replaces its number.
-pub(super) const DEFAULT_TIMEOUT_DOC: &str = "Defaults to 120000 (2 minutes).";
+pub(crate) const MAX_STREAM_BYTES: usize = 100_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const TAIL_BYTES: usize = 4_096;
@@ -184,14 +181,14 @@ impl Tool for ShellTool {
 
     fn schema(&self) -> serde_json::Value {
         let mut schema = schema_for::<ShellInput>();
-        if self.timeout_ms != kage_core::config::ShellToolConfig::default().timeout_ms {
-            crate::schema::retarget_property_doc(
-                &mut schema,
-                "timeout_ms",
-                DEFAULT_TIMEOUT_DOC,
-                &format!("Defaults to {}.", self.timeout_ms),
-            );
-        }
+        crate::schema::set_property_doc(
+            &mut schema,
+            "timeout_ms",
+            &format!(
+                "Hard timeout in milliseconds. Defaults to {}.",
+                self.timeout_ms
+            ),
+        );
         schema
     }
 
@@ -308,7 +305,7 @@ pub fn run(
 /// # Errors
 ///
 /// As [`run`].
-pub fn run_capped(
+pub(crate) fn run_capped(
     command: &str,
     cwd: &Path,
     timeout: Duration,

@@ -25,6 +25,11 @@ use serde::{Deserialize, Serialize};
 use crate::config::{MediaToolConfig, SpeechToolConfig, config_error};
 use crate::error::Result;
 
+/// The largest `max_bytes` a tool table may set. Any context window is
+/// far below it, and it keeps a tool's `budget + 1` from overflowing a
+/// `usize` on a 32-bit build.
+const MAX_TOOL_BYTES: u64 = 1 << 30;
+
 fn default_true() -> bool {
     true
 }
@@ -73,8 +78,13 @@ pub struct ToolsConfig {
     /// `[tools.<name>]` for every other tool: `write`, `todo_list`,
     /// `agent`, `swarm`, `send_message`, `ask_user_question`,
     /// `exit_plan`, plugin tools and MCP tools.
+    ///
+    /// Held as raw TOML so a stray non-table key (`[tools] foo = 1`),
+    /// ignored before this table existed, still parses instead of
+    /// refusing to start. [`Self::validate`] then rejects a table whose
+    /// keys no tool takes.
     #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
-    pub other: BTreeMap<String, ToolToggle>,
+    pub other: BTreeMap<String, toml::Value>,
     /// The images endpoint the `generate_image` tool calls
     /// (`[tools.generate_image]`). Without one the tool is not
     /// registered.
@@ -98,8 +108,12 @@ pub struct ToolsConfig {
 }
 
 /// The two keys every `[tools.<name>]` table takes.
+///
+/// `deny_unknown_fields` so a key no tool reads (`[tools.write]
+/// max_bytes = 1000`) fails loudly instead of parsing and doing
+/// nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ToolToggle {
     /// `false` removes the tool: the model never sees it and a call to
     /// it fails as an unknown tool.
@@ -133,7 +147,7 @@ macro_rules! tool_config {
     ) => {
         $(#[$meta])*
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-        #[serde(default)]
+        #[serde(default, deny_unknown_fields)]
         pub struct $name {
             /// `false` removes the tool: the model never sees it.
             #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -304,9 +318,21 @@ impl ToolsConfig {
 
     /// Every configured `enabled` / `description` pair, keyed by tool
     /// name, the typed tables included.
+    ///
+    /// An `other` entry that is not a toggle table (a stray `[tools] foo
+    /// = 1`, or a table with a key no tool takes) is left out here;
+    /// [`Self::validate`] is what reports it.
     #[must_use]
     pub fn toggles(&self) -> BTreeMap<String, ToolToggle> {
-        let mut out = self.other.clone();
+        let mut out: BTreeMap<String, ToolToggle> = self
+            .other
+            .iter()
+            .filter_map(|(name, value)| {
+                ToolToggle::deserialize(value.clone())
+                    .ok()
+                    .map(|toggle| (name.clone(), toggle))
+            })
+            .collect();
         for (name, toggle) in [
             ("read", self.read.toggle()),
             ("edit", self.edit.toggle()),
@@ -343,9 +369,34 @@ impl ToolsConfig {
             .collect()
     }
 
+    /// `[tools.<name>]` tables whose name matches no tool in `known`.
+    ///
+    /// A typo or the wrong case (`[tools.web-search]`, `[tools.Shell]`)
+    /// would otherwise sit in the config doing nothing, so a host warns
+    /// once the registry is built.
+    #[must_use]
+    pub fn unmatched(&self, known: &BTreeSet<String>) -> BTreeSet<String> {
+        self.toggles()
+            .into_keys()
+            .filter(|name| !known.contains(name))
+            .collect()
+    }
+
     /// Reject values no tool could work with: an empty description, a
-    /// zero limit, or a default above its own ceiling.
+    /// zero limit, a default above its own ceiling, or a `[tools.<name>]`
+    /// table carrying a key no tool reads.
     pub fn validate(&self) -> Result<()> {
+        for (name, value) in &self.other {
+            // A non-table value (`[tools] foo = 1`) was ignored before
+            // this table existed, so keep ignoring it rather than
+            // refusing to start.
+            if !value.is_table() {
+                continue;
+            }
+            if let Err(err) = ToolToggle::deserialize(value.clone()) {
+                return Err(config_error(format!("[tools.{name}] {err}")));
+            }
+        }
         for (name, toggle) in self.toggles() {
             if toggle
                 .description
@@ -400,6 +451,25 @@ impl ToolsConfig {
                 self.web_search.count, self.web_search.max_count
             )));
         }
+        // A cap this large is already far past any context window, and
+        // keeping it under a ceiling leaves room for the `+ 1` a tool
+        // adds to its budget without overflowing a `usize`.
+        for (tool, key, value) in [
+            ("read", "max_bytes", self.read.max_bytes),
+            ("edit", "max_bytes", self.edit.max_bytes),
+            ("web_fetch", "max_bytes", self.web_fetch.max_bytes),
+            (
+                "web_fetch",
+                "max_bytes_limit",
+                self.web_fetch.max_bytes_limit,
+            ),
+        ] {
+            if value > MAX_TOOL_BYTES {
+                return Err(config_error(format!(
+                    "[tools.{tool}] {key} ({value}) is above the {MAX_TOOL_BYTES} byte ceiling"
+                )));
+            }
+        }
         self.generate_image.validate("generate_image")?;
         self.edit_image.validate("edit_image")?;
         self.generate_speech.endpoint.validate("generate_speech")?;
@@ -417,14 +487,17 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
-    fn load(toml: &str) -> Config {
+    fn try_load(toml: &str) -> std::result::Result<Config, figment::Error> {
         use figment::Figment;
         use figment::providers::{Format, Serialized, Toml};
         Figment::new()
             .merge(Serialized::defaults(Config::default()))
             .merge(Toml::string(toml))
             .extract()
-            .expect("config parses")
+    }
+
+    fn load(toml: &str) -> Config {
+        try_load(toml).expect("config parses")
     }
 
     #[test]
@@ -515,10 +588,65 @@ mod tests {
                 "max_bytes_limit",
             ),
             ("[tools.web_search]\ncount = 30\n", "max_count"),
+            ("[tools.read]\nmax_bytes = 1099511627776\n", "byte ceiling"),
         ] {
             let err = load(toml).tools.validate().unwrap_err().to_string();
             assert!(err.contains(needle), "{toml}: {err}");
         }
+    }
+
+    /// A key no tool reads used to parse and do nothing, so a disable
+    /// meant for safety could silently not apply. A typed table refuses
+    /// it while parsing, an `other` table when the config validates.
+    #[test]
+    fn a_key_no_tool_reads_is_refused() {
+        for (toml, needle) in [
+            ("[tools.shell]\nmax_byte = 1000\n", "max_byte"),
+            ("[tools.read]\nmax_byte = 1000\n", "max_byte"),
+        ] {
+            let err = try_load(toml).unwrap_err().to_string();
+            assert!(err.contains(needle), "{toml}: {err}");
+        }
+        for (toml, needle) in [
+            ("[tools.write]\nmax_bytes = 1000\n", "max_bytes"),
+            (
+                "[tools.github]\ndelete_repository = { enabled = false }\n",
+                "delete_repository",
+            ),
+        ] {
+            let err = load(toml).tools.validate().unwrap_err().to_string();
+            assert!(err.contains(needle), "{toml}: {err}");
+        }
+    }
+
+    /// A stray non-table key under `[tools]` was ignored before the
+    /// per-tool tables existed, so it must not refuse to start.
+    #[test]
+    fn a_stray_non_table_key_is_ignored() {
+        let cfg = load("[tools]\nfoo = 1\n[tools.write]\nenabled = false\n");
+        cfg.tools.validate().unwrap();
+        assert!(cfg.tools.disabled().contains("write"));
+        assert!(!cfg.tools.toggles().contains_key("foo"));
+    }
+
+    /// A name that matches no tool is reported rather than silently
+    /// doing nothing, which is what a `[tools.web-search]` typo or the
+    /// wrong case would otherwise do.
+    #[test]
+    fn a_name_matching_no_tool_is_reported() {
+        let cfg = load(
+            "[tools.web-search]\nenabled = false\n[tools.Shell]\nenabled = false\n\
+             [tools.shell]\nenabled = false\n",
+        );
+        cfg.tools.validate().unwrap();
+        let known: BTreeSet<String> = ["shell", "read", "write"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            cfg.tools.unmatched(&known).into_iter().collect::<Vec<_>>(),
+            vec!["Shell", "web-search"]
+        );
     }
 
     #[test]
