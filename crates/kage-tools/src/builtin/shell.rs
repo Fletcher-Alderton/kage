@@ -181,14 +181,18 @@ impl Tool for ShellTool {
 
     fn schema(&self) -> serde_json::Value {
         let mut schema = schema_for::<ShellInput>();
-        crate::schema::set_property_doc(
-            &mut schema,
-            "timeout_ms",
-            &format!(
-                "Hard timeout in milliseconds. Defaults to {}.",
-                self.timeout_ms
-            ),
-        );
+        // The derived doc already states the default; keeping it leaves
+        // the default schema byte-identical, so prompt caches survive.
+        if self.timeout_ms != kage_core::config::ShellToolConfig::default().timeout_ms {
+            crate::schema::set_property_doc(
+                &mut schema,
+                "timeout_ms",
+                &format!(
+                    "Hard timeout in milliseconds. Defaults to {}.",
+                    self.timeout_ms
+                ),
+            );
+        }
         schema
     }
 

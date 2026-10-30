@@ -97,15 +97,21 @@ impl Tool for WebFetchTool {
 
     fn schema(&self) -> serde_json::Value {
         let mut schema = schema_for::<WebFetchInput>();
-        crate::schema::set_property_doc(
-            &mut schema,
-            "max_bytes",
-            &format!(
-                "Cap on response body bytes read. Defaults to {} and is hard-capped at {}.",
-                grouped(self.max_bytes),
-                grouped(self.max_bytes_limit)
-            ),
-        );
+        // The derived doc already states the defaults; keeping it leaves
+        // the default schema byte-identical, so prompt caches survive.
+        let defaults = kage_core::config::WebFetchToolConfig::default();
+        if (self.max_bytes, self.max_bytes_limit) != (defaults.max_bytes, defaults.max_bytes_limit)
+        {
+            crate::schema::set_property_doc(
+                &mut schema,
+                "max_bytes",
+                &format!(
+                    "Cap on response body bytes read. Defaults to {} and is hard-capped at {}.",
+                    grouped(self.max_bytes),
+                    grouped(self.max_bytes_limit)
+                ),
+            );
+        }
         schema
     }
 

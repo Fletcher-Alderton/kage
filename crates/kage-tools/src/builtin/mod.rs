@@ -211,6 +211,42 @@ mod tests {
         );
     }
 
+    /// At the defaults every rewritten property keeps the exact text it
+    /// had before limits were configurable, so the default tool list
+    /// stays byte-identical and cached prompts stay valid.
+    #[test]
+    fn default_schema_docs_keep_their_wording() {
+        let r = builtin_registry();
+        for (tool, key, text) in [
+            (
+                "shell",
+                "timeout_ms",
+                "Hard timeout in milliseconds. Defaults to 120000 (2 minutes).",
+            ),
+            (
+                "web_fetch",
+                "max_bytes",
+                "Cap on response body bytes read. Defaults to 2,000,000 and is\nhard-capped at 5,000,000.",
+            ),
+            (
+                "grep",
+                "max_matches",
+                "Cap on total matches across all files. Defaults to 1000.",
+            ),
+            (
+                "web_search",
+                "count",
+                "How many results to return. Defaults to 8, at most 20.",
+            ),
+        ] {
+            assert_eq!(
+                spec(&r, tool).schema["properties"][key]["description"],
+                text,
+                "{tool}.{key}"
+            );
+        }
+    }
+
     /// A configured limit is written into the schema the model reads.
     /// The description is set outright rather than rewritten inside the
     /// derived doc comment, so a reworded comment cannot turn it into a

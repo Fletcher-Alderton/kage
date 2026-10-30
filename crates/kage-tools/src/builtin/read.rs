@@ -289,7 +289,7 @@ fn slice_file(
 }
 
 /// Decode one gathered line into `lines`, counting its bytes into
-/// `shown`, and return whether the [`MAX_BYTES`] cap ended the read.
+/// `shown`, and return whether the `max_bytes` cap ended the read.
 /// An oversized line is cut at a character boundary. An incomplete
 /// sequence with a [`Gather::Capped`] line means the cap split the
 /// line's final character: the whole characters that fit go in and
