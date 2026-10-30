@@ -218,6 +218,9 @@ for any tool, built-in, plugin or MCP:
   it to steer a model ("prefer `rg`"), or to shorten a description for
   a small context window.
 
+A project's `.kage/config.toml` can disable a tool too, but it can
+never turn back on a tool your own config disabled.
+
 ```toml
 [tools.web_search]
 enabled = false          # an MCP server does search instead
