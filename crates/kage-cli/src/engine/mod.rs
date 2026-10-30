@@ -80,9 +80,8 @@ use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 pub(crate) use edit_image_tool::EDIT_IMAGE_TOOL;
 
 /// Tools built per run into a copy of the session registry rather than
-/// into it, so a `[tools.<name>]` table for one is not a typo. The
-/// hosts that build a registry without a session seed these too.
-pub(crate) const PER_RUN_TOOLS: [&str; 5] = [
+/// into it, so a `[tools.<name>]` table for one is not a typo.
+const PER_RUN_TOOLS: [&str; 5] = [
     AGENT_TOOL,
     SWARM_TOOL,
     MAILBOX_TOOL,

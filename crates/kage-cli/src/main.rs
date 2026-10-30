@@ -1496,14 +1496,13 @@ pub(crate) fn build_session_path(dir: &std::path::Path, session: SessionId) -> P
 }
 
 /// The config and the tool registry a host runs with: `[tools]` and
-/// `[shell]` applied, MCP servers registered, and `[tools.<name>]`
-/// tables that name no tool reported.
+/// `[shell]` applied and MCP servers registered. The engine session the
+/// run opens reports `[tools.<name>]` tables that name no tool, once the
+/// media tools are in too.
 ///
 /// A config that does not load exits rather than falling back to the
 /// defaults: a broken `[tools.*]` key would otherwise silently drop
-/// `[permissions]` and `[shell]` too. The per-run tools are seeded
-/// before the report, since they are built into a copy of the registry
-/// and never into it.
+/// `[permissions]` and `[shell]` too.
 fn run_tools(
     workdir: &Path,
     plugin_runtime: Option<&kage_plugin::PluginRuntime>,
@@ -1526,12 +1525,6 @@ fn run_tools(
     let (mcp_manager, mcp_errors) = mcp::spawn_and_register(&mut tools, workdir, plugin_runtime);
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
-    }
-    tools.note_known(&engine::PER_RUN_TOOLS);
-    for name in tools.unmatched_overrides() {
-        eprintln!(
-            "kage: [tools.{name}] matches no tool; ignoring it (check the name and its case)"
-        );
     }
     Ok((layered, tools, mcp_manager))
 }

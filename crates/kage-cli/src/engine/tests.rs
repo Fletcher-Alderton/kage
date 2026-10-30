@@ -293,6 +293,38 @@ fn is_session_changed(envelope: &Envelope) -> bool {
     )
 }
 
+/// Opening a session reports a `[tools.<name>]` table that names no tool
+/// once, and stays quiet about the per-run tools, which never reach the
+/// session registry.
+#[test]
+fn a_tool_table_naming_no_tool_is_reported_once() {
+    let h = harness(MockProvider::replaying(text_turn("reply")));
+    let config: kage_core::config::ToolsConfig = toml::from_str(
+        "[web-search]\nenabled = false\n\
+         [agent]\nenabled = false\n\
+         [ask_user_question]\ndescription = \"Ask.\"\n",
+    )
+    .unwrap();
+    let id = SessionId::new();
+    h.engine.open(SessionSpec {
+        tools: kage_tools::configured_registry(&config, &kage_core::config::ShellConfig::default()),
+        ..h.spec(id)
+    });
+    prompt(&h.engine, id, "hi", Delivery::Queue);
+    let seen = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::RunEnded { .. }))
+    });
+    let unmatched: Vec<String> = notices(&seen)
+        .into_iter()
+        .filter(|text| text.contains("matches no tool"))
+        .collect();
+    assert_eq!(unmatched.len(), 1, "{unmatched:?}");
+    assert!(
+        unmatched[0].starts_with("[tools.web-search]"),
+        "{unmatched:?}"
+    );
+}
+
 #[test]
 fn prompt_runs_and_records_the_history() {
     let dir = tempfile::tempdir().unwrap();
