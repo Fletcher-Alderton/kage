@@ -807,13 +807,20 @@ impl Dispatcher {
     ///
     /// The delegation, question and plan tools are built per run into a
     /// copy of the registry, so they never reach `register` here; seeding
-    /// them stops every table for one from looking like a typo.
+    /// them stops every table for one from looking like a typo. So does
+    /// seeding `mcp_resource`, which MCP registers only once a server is
+    /// up. A sub-agent's registry is a copy of its parent's, so only a
+    /// root session reports, once.
     fn warn_unmatched_tools(&mut self, id: SessionId) {
         let bus = Arc::clone(&self.bus);
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
+        if session.link.is_some() {
+            return;
+        }
         session.tools.note_known(&PER_RUN_TOOLS);
+        session.tools.note_known(&[kage_mcp::RESOURCE_TOOL]);
         warn_unmatched(&bus, id, session.tools.unmatched_overrides());
     }
 

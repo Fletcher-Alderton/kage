@@ -300,7 +300,7 @@ fn is_session_changed(envelope: &Envelope) -> bool {
 fn a_tool_table_naming_no_tool_is_reported_once() {
     let h = harness(MockProvider::replaying(text_turn("reply")));
     let config: kage_core::config::ToolsConfig = toml::from_str(
-        "[web-search]\nenabled = false\n\
+        "[web-search]\nenabled = false\n[mcp_resource]\nenabled = false\n\
          [agent]\nenabled = false\n\
          [ask_user_question]\ndescription = \"Ask.\"\n",
     )
@@ -2069,6 +2069,34 @@ fn agent_call_returns_the_child_reply_and_records_the_child() {
         parent_file.contains(&format!("session=\\\"{child}\\\"")),
         "{parent_file}"
     );
+}
+
+/// A sub-agent's registry is a copy of its parent's, so a table naming
+/// no tool is reported by the root session alone.
+#[test]
+fn a_sub_agent_does_not_repeat_the_unmatched_table_warning() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("find it"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]));
+    let config: kage_core::config::ToolsConfig =
+        toml::from_str("[web-search]\nenabled = false\n").unwrap();
+    let parent_id = SessionId::new();
+    h.engine.open(SessionSpec {
+        tools: kage_tools::configured_registry(&config, &kage_core::config::ShellConfig::default()),
+        agents: Some(agent_setup(1, 1)),
+        ..h.spec(parent_id)
+    });
+    prompt(&h.engine, parent_id, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+    assert_eq!(spawned(&events).len(), 1);
+    let unmatched = notices(&events)
+        .into_iter()
+        .filter(|text| text.contains("matches no tool"))
+        .count();
+    assert_eq!(unmatched, 1);
 }
 
 #[test]

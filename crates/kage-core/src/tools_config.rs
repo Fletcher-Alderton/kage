@@ -364,6 +364,12 @@ impl ToolsConfig {
     /// zero limit, a default above its own ceiling, or a `[tools.<name>]`
     /// table carrying a key no tool reads.
     pub fn validate(&self) -> Result<()> {
+        // `toggles` reads the overrides off the serialized table, so a
+        // value TOML cannot hold (an integer above `i64::MAX`) would
+        // silently drop every `enabled = false`. Refuse it instead.
+        if let Err(err) = toml::Value::try_from(self) {
+            return Err(config_error(format!("[tools] {err}")));
+        }
         for (name, value) in &self.other {
             // A non-table value (`[tools] foo = 1`) was ignored before
             // this table existed, so keep ignoring it rather than
@@ -571,6 +577,18 @@ mod tests {
         for name in names {
             assert_eq!(tools.descriptions()[name], format!("{name}!"));
         }
+    }
+
+    /// A limit TOML cannot hold would empty `toggles`, so it is refused
+    /// rather than leaving every disabled tool enabled.
+    #[test]
+    fn a_limit_too_large_for_toml_is_refused() {
+        let mut tools = load("[tools.web_fetch]\nenabled = false\n").tools;
+        tools.grep.max_matches = u64::MAX;
+        assert!(tools.validate().is_err());
+        tools.grep.max_matches = i64::MAX as u64;
+        tools.validate().unwrap();
+        assert!(tools.disabled().contains("web_fetch"));
     }
 
     /// `other` holds raw TOML, so a `Config` round trip is what proves
