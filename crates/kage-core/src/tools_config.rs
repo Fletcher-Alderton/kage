@@ -369,19 +369,6 @@ impl ToolsConfig {
             .collect()
     }
 
-    /// `[tools.<name>]` tables whose name matches no tool in `known`.
-    ///
-    /// A typo or the wrong case (`[tools.web-search]`, `[tools.Shell]`)
-    /// would otherwise sit in the config doing nothing, so a host warns
-    /// once the registry is built.
-    #[must_use]
-    pub fn unmatched(&self, known: &BTreeSet<String>) -> BTreeSet<String> {
-        self.toggles()
-            .into_keys()
-            .filter(|name| !known.contains(name))
-            .collect()
-    }
-
     /// Reject values no tool could work with: an empty description, a
     /// zero limit, a default above its own ceiling, or a `[tools.<name>]`
     /// table carrying a key no tool reads.
@@ -560,6 +547,23 @@ mod tests {
         t.validate().unwrap();
     }
 
+    /// `other` holds raw TOML, so a `Config` round trip is what proves
+    /// the flattened map survives serialization and re-parsing.
+    #[test]
+    fn a_whole_config_round_trips_with_other_tables() {
+        let cfg = load(
+            "[tools.write]\nenabled = false\n[tools.ask_user_question]\n\
+             description = \"Decide.\"\n[tools.read]\nmax_bytes = 500\n",
+        );
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.tools, cfg.tools);
+        assert!(!back.tools.toggles()["write"].enabled);
+        assert_eq!(back.tools.descriptions()["ask_user_question"], "Decide.");
+        assert_eq!(back.tools.read.max_bytes, 500);
+        back.validate().unwrap();
+    }
+
     #[test]
     fn round_trips_through_toml() {
         let cfg = load(
@@ -627,26 +631,6 @@ mod tests {
         cfg.tools.validate().unwrap();
         assert!(cfg.tools.disabled().contains("write"));
         assert!(!cfg.tools.toggles().contains_key("foo"));
-    }
-
-    /// A name that matches no tool is reported rather than silently
-    /// doing nothing, which is what a `[tools.web-search]` typo or the
-    /// wrong case would otherwise do.
-    #[test]
-    fn a_name_matching_no_tool_is_reported() {
-        let cfg = load(
-            "[tools.web-search]\nenabled = false\n[tools.Shell]\nenabled = false\n\
-             [tools.shell]\nenabled = false\n",
-        );
-        cfg.tools.validate().unwrap();
-        let known: BTreeSet<String> = ["shell", "read", "write"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        assert_eq!(
-            cfg.tools.unmatched(&known).into_iter().collect::<Vec<_>>(),
-            vec!["Shell", "web-search"]
-        );
     }
 
     #[test]

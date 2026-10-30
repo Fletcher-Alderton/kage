@@ -42,8 +42,8 @@ use kage_core::agents::AgentDefs;
 use kage_core::config::Config;
 use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{
-    Command, CommandKind, Delivery, HostEvent, NoticeLevel, PermissionDecision, RequestId,
-    RunOutcome, SessionState, Usage,
+    ASK_USER_QUESTION_TOOL, Command, CommandKind, Delivery, EXIT_PLAN_TOOL, HostEvent, NoticeLevel,
+    PermissionDecision, RequestId, RunOutcome, SessionState, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{
@@ -784,9 +784,33 @@ impl Dispatcher {
         );
         self.active.get_or_insert(id);
         self.apply_plugin_tools(id);
+        self.warn_unmatched_tools(id);
         if starting_mcp {
             self.start_mcp(id);
         }
+    }
+
+    /// Report `[tools.<name>]` tables that name no tool this session can
+    /// hold: a typo, the wrong case, or a `[tools.rename]` target would
+    /// otherwise sit in the config doing nothing, and a disable meant for
+    /// safety would silently not apply.
+    ///
+    /// The delegation, question and plan tools are built per run into a
+    /// copy of the registry, so they never reach `register` here; seeding
+    /// them stops every table for one from looking like a typo.
+    fn warn_unmatched_tools(&mut self, id: SessionId) {
+        let bus = Arc::clone(&self.bus);
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        session.tools.note_known(&[
+            AGENT_TOOL,
+            SWARM_TOOL,
+            MAILBOX_TOOL,
+            ASK_USER_QUESTION_TOOL,
+            EXIT_PLAN_TOOL,
+        ]);
+        warn_unmatched(&bus, id, session.tools.unmatched_overrides());
     }
 
     /// Register the session's plugin tools, replacing earlier ones.
@@ -801,7 +825,7 @@ impl Dispatcher {
             let name = &miss.name;
             let text = if miss.disabled {
                 format!(
-                    "override_tool: `{name}` is disabled by [tools.{name}] enabled = false; registered anyway"
+                    "override_tool: `{name}` is disabled by [tools.{name}] enabled = false; the override is ignored"
                 )
             } else {
                 format!(

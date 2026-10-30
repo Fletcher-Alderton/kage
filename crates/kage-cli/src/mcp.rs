@@ -98,8 +98,10 @@ fn serve_registry(
     let registry = kage_tools::configured_registry(config, shell);
     let wanted: Vec<String> = tools.iter().map(|t| t.trim().to_owned()).collect();
     if let Some(off) = wanted.iter().find(|t| registry.is_disabled(t)) {
+        // The table is keyed by the real name, which a rename hides.
+        let real = registry.real_name(off);
         return Err(format!(
-            "tool `{off}` in --tools is disabled ([tools.{off}] enabled = false)"
+            "tool `{off}` in --tools is disabled ([tools.{real}] enabled = false)"
         ));
     }
     // The known set is the full registry, captured before the

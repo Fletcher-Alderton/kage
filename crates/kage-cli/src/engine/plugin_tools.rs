@@ -13,6 +13,9 @@ pub(super) struct PluginTools {
     names: Vec<String>,
     displaced: HashMap<String, Arc<dyn Tool>>,
     renames: Vec<(String, String)>,
+    /// `[tools.<name>] description` values an override displaced, so a
+    /// reload that stops overriding the tool puts them back.
+    cleared: HashMap<String, String>,
 }
 
 /// A `kage.override_tool` that replaced nothing.
@@ -42,6 +45,9 @@ impl PluginTools {
         for (_, tool) in self.displaced.drain() {
             tools.register(tool);
         }
+        for (name, description) in self.cleared.drain() {
+            tools.restore_description(&name, description);
+        }
         for (from, _) in self.renames.drain(..) {
             tools.remove_rename(&from);
         }
@@ -60,8 +66,11 @@ impl PluginTools {
             self.add(tools, tool);
             // The plugin's description matches the code now running, so
             // it replaces a `[tools.<name>] description` written for the
-            // tool this override displaced.
-            tools.clear_description(&name);
+            // tool this override displaced. The displaced value is kept
+            // so a reload without the override puts it back.
+            if let Some(description) = tools.clear_description(&name) {
+                self.cleared.insert(name.clone(), description);
+            }
         }
         self.renames = rt.registered_renames();
         for (from, to) in &self.renames {

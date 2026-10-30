@@ -525,6 +525,22 @@ mod tests {
         assert_eq!(body.len(), 100);
     }
 
+    /// `[tools.read] max_bytes` is reachable through an environment
+    /// variable, and `validate` has a ceiling, but a tool built past it
+    /// must still read rather than overflow the `budget + 1` that
+    /// gathers a line.
+    #[test]
+    fn a_max_bytes_at_the_top_of_usize_still_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), "a\nb\n").unwrap();
+        let tool = ReadTool::new(&ReadToolConfig {
+            max_bytes: u64::MAX,
+            ..ReadToolConfig::default()
+        });
+        let out = run(&tool, dir.path(), serde_json::json!({"path":"f.txt"})).unwrap();
+        assert_eq!(out.text, "a\nb\n");
+    }
+
     /// A file whose size is exactly the cap is fully shown and says
     /// nothing about truncation.
     #[test]

@@ -91,7 +91,9 @@ impl Tool for WebSearchTool {
             "count",
             &format!(
                 "How many results to return. Defaults to {}, at most {}.",
-                self.config.count,
+                // A `count` above the ceiling is clamped at call time, so
+                // the doc must not promise more than the call can return.
+                self.config.count.min(self.max_count()),
                 self.max_count()
             ),
         );
@@ -466,6 +468,19 @@ mod tests {
             .unwrap_or_default()
             .to_owned();
         assert!(doc.contains("at most 20"), "{doc}");
+
+        // A `count` above the ceiling is clamped, so the doc says 20.
+        let over = super::WebSearchTool::new(kage_core::config::WebSearchConfig {
+            engine: kage_core::config::SearchEngine::Brave,
+            count: 25,
+            max_count: 30,
+            ..Default::default()
+        });
+        let doc = over.schema()["properties"]["count"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(doc.contains("Defaults to 20, at most 20"), "{doc}");
 
         // Every other engine keeps the configured ceiling.
         let searxng = super::WebSearchTool::new(kage_core::config::WebSearchConfig {
