@@ -70,9 +70,18 @@ const MAX_MEDIA_TIMEOUT_SECS: u64 = 3600;
 /// (`base_url`, with `api_key_env` and `headers`). `base_url` wins when
 /// both are set. A project's `.kage/config.toml` never sets this table,
 /// because it names where a key is sent.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaToolConfig {
+    /// `false` removes the tool: the model never sees it.
+    #[serde(
+        default = "crate::tools_config::default_true",
+        skip_serializing_if = "crate::tools_config::is_true"
+    )]
+    pub enabled: bool,
+    /// Replaces the description the model reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// The provider whose base URL, key and headers the tool reuses:
     /// `openai`, an OpenAI-compatible provider kage ships, or a
     /// `[providers.custom.<id>]` of kind `openai`.
@@ -100,12 +109,34 @@ pub struct MediaToolConfig {
     pub timeout_secs: Option<u64>,
 }
 
+impl Default for MediaToolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            description: None,
+            provider: None,
+            base_url: None,
+            api_key_env: None,
+            headers: BTreeMap::new(),
+            model: None,
+            timeout_secs: None,
+        }
+    }
+}
+
 impl MediaToolConfig {
     /// Whether the defaults are in effect, which leaves the tool
     /// unregistered.
     #[must_use]
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Whether the table asks for the tool: set, and not
+    /// `enabled = false`.
+    #[must_use]
+    pub fn is_wanted(&self) -> bool {
+        self.enabled && !self.is_default()
     }
 
     /// Reject a `timeout_secs` outside the range a call accepts.
@@ -148,6 +179,13 @@ impl SpeechToolConfig {
     #[must_use]
     pub fn is_default(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Whether the table asks for the tool: set, `voice` included, and
+    /// not `enabled = false`.
+    #[must_use]
+    pub fn is_wanted(&self) -> bool {
+        self.endpoint.enabled && !self.is_default()
     }
 }
 
@@ -2425,5 +2463,22 @@ default = "ask"   # keep asking
         assert_eq!(speech.endpoint.model.as_deref(), Some("speech-small"));
         assert_eq!(speech.endpoint.timeout_secs, Some(90));
         assert_eq!(speech.voice.as_deref(), Some("alloy"));
+    }
+
+    /// A voice-only table still asks for the tool, so its missing
+    /// endpoint is reported; `enabled = false` is what turns it off.
+    #[test]
+    fn a_speech_table_is_wanted_until_disabled() {
+        let speech = |toml: &str| {
+            toml::from_str::<Config>(toml)
+                .unwrap()
+                .tools
+                .generate_speech
+        };
+        assert!(!speech("").is_wanted());
+        assert!(speech("[tools.generate_speech]\nvoice = \"alloy\"\n").is_wanted());
+        assert!(
+            !speech("[tools.generate_speech]\nvoice = \"alloy\"\nenabled = false\n").is_wanted()
+        );
     }
 }

@@ -34,24 +34,38 @@ const MAX_TIMEOUT_SECS: u64 = 3600;
 pub(crate) trait WithMediaTools {
     /// `self` with each configured media tool registered when its table
     /// resolves to an endpoint and a model.
-    /// An unset table changes nothing. One that does not resolve is
-    /// reported on stderr and leaves the tool out, so a broken table
-    /// costs one tool rather than the session.
+    /// An unset table, or one with `enabled = false`, changes nothing.
+    /// One that does not resolve is reported on stderr and leaves the
+    /// tool out, so a broken table costs one tool rather than the
+    /// session.
     #[must_use]
     fn with_media_tools(self, config: &Config) -> Self;
 }
 
 impl WithMediaTools for ToolRegistry {
     fn with_media_tools(mut self, config: &Config) -> Self {
-        if config.tools.generate_image.is_default()
-            && config.tools.edit_image.is_default()
-            && config.tools.generate_speech.is_default()
-            && config.tools.generate_music.is_default()
+        let tools = &config.tools;
+        // A set table names a real tool even when it is disabled or
+        // broken, so it must not be reported as matching no tool.
+        for (name, set) in [
+            (GENERATE_IMAGE_TOOL, !tools.generate_image.is_default()),
+            (EDIT_IMAGE_TOOL, !tools.edit_image.is_default()),
+            (GENERATE_SPEECH_TOOL, !tools.generate_speech.is_default()),
+            (GENERATE_MUSIC_TOOL, !tools.generate_music.is_default()),
+        ] {
+            if set {
+                self.note_known(&[name]);
+            }
+        }
+        if !tools.generate_image.is_wanted()
+            && !tools.edit_image.is_wanted()
+            && !tools.generate_speech.is_wanted()
+            && !tools.generate_music.is_wanted()
         {
             return self;
         }
         let store = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
-        if !config.tools.generate_image.is_default() {
+        if tools.generate_image.is_wanted() {
             match GenerateImageTool::from_config(config, &store) {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
@@ -61,7 +75,7 @@ impl WithMediaTools for ToolRegistry {
                 }
             }
         }
-        if !config.tools.edit_image.is_default() {
+        if tools.edit_image.is_wanted() {
             match EditImageTool::from_config(config, &store) {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
@@ -69,7 +83,7 @@ impl WithMediaTools for ToolRegistry {
                 }
             }
         }
-        if !config.tools.generate_speech.is_default() {
+        if tools.generate_speech.is_wanted() {
             match GenerateSpeechTool::from_config(config, &store) {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
@@ -79,7 +93,7 @@ impl WithMediaTools for ToolRegistry {
                 }
             }
         }
-        if !config.tools.generate_music.is_default() {
+        if tools.generate_music.is_wanted() {
             match GenerateMusicTool::from_config(config, &store) {
                 Ok(tool) => self.register(Arc::new(tool)),
                 Err(reason) => {
@@ -528,5 +542,39 @@ mod tests {
         for name in crate::engine::MEDIA_TOOLS {
             assert!(tools.get(name).is_none(), "{name}");
         }
+    }
+
+    /// `enabled` and `description` work on a media table like any other
+    /// `[tools.<name>]` table, and a disabled one is not a typo.
+    #[test]
+    fn media_tables_take_enabled_and_description() {
+        let config: Config = toml::from_str(
+            r#"
+            [tools.generate_image]
+            base_url = "https://image.example/v1"
+            model = "image"
+            enabled = false
+
+            [tools.generate_speech]
+            enabled = false
+
+            [tools.generate_music]
+            base_url = "https://music.example/v1"
+            model = "music"
+            description = "Write a song."
+            "#,
+        )
+        .unwrap();
+        let tools =
+            kage_tools::configured_registry(&config.tools, &config.shell).with_media_tools(&config);
+        assert!(tools.get(GENERATE_IMAGE_TOOL).is_none());
+        assert!(tools.get(GENERATE_SPEECH_TOOL).is_none());
+        let music = tools
+            .list_for_provider()
+            .into_iter()
+            .find(|s| s.name == GENERATE_MUSIC_TOOL)
+            .expect("generate_music is listed");
+        assert_eq!(music.description, "Write a song.");
+        assert!(tools.unmatched_overrides().is_empty());
     }
 }

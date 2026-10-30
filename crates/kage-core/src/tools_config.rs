@@ -12,9 +12,10 @@
 //! ```
 //!
 //! The built-in file, shell and web tools also take their limits (see
-//! the per-tool structs). Any other registered tool, such as `agent`,
-//! `ask_user_question`, a plugin tool or an MCP tool
-//! (`<server>__<tool>`), takes `enabled` and `description` only.
+//! the per-tool structs), and the media tools their endpoint. Any other
+//! registered tool, such as `agent`, `ask_user_question`, a plugin tool
+//! or an MCP tool (`<server>__<tool>`), takes `enabled` and
+//! `description` only.
 //!
 //! Keys are the tool's real name, never a `[tools.rename]` target.
 
@@ -30,13 +31,13 @@ use crate::error::Result;
 /// `usize` on a 32-bit build.
 const MAX_TOOL_BYTES: u64 = 1 << 30;
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
 // serde's `skip_serializing_if` hands the field over by reference.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_true(value: &bool) -> bool {
+pub(crate) fn is_true(value: &bool) -> bool {
     *value
 }
 
@@ -177,15 +178,6 @@ macro_rules! tool_config {
             pub fn is_default(&self) -> bool {
                 *self == Self::default()
             }
-
-            /// The `enabled` and `description` keys.
-            #[must_use]
-            pub fn toggle(&self) -> ToolToggle {
-                ToolToggle {
-                    enabled: self.enabled,
-                    description: self.description.clone(),
-                }
-            }
         }
     };
 }
@@ -317,37 +309,36 @@ impl ToolsConfig {
     }
 
     /// Every configured `enabled` / `description` pair, keyed by tool
-    /// name, the typed tables included.
+    /// name.
     ///
-    /// An `other` entry that is not a toggle table (a stray `[tools] foo
-    /// = 1`, or a table with a key no tool takes) is left out here;
-    /// [`Self::validate`] is what reports it.
+    /// Read off the serialized `[tools]` table rather than a list of the
+    /// typed tables, so a typed table added later cannot leave its
+    /// `enabled = false` silently ignored. A non-table value (a stray
+    /// `[tools] foo = 1`) is left out; [`Self::validate`] reports a
+    /// table with a key no tool takes.
     #[must_use]
     pub fn toggles(&self) -> BTreeMap<String, ToolToggle> {
-        let mut out: BTreeMap<String, ToolToggle> = self
-            .other
-            .iter()
+        let Ok(toml::Value::Table(tables)) = toml::Value::try_from(self) else {
+            return BTreeMap::new();
+        };
+        tables
+            .into_iter()
+            .filter(|(name, _)| name != "rename")
             .filter_map(|(name, value)| {
-                ToolToggle::deserialize(value.clone())
-                    .ok()
-                    .map(|toggle| (name.clone(), toggle))
+                let table = value.as_table()?;
+                let toggle = ToolToggle {
+                    enabled: table
+                        .get("enabled")
+                        .and_then(toml::Value::as_bool)
+                        .unwrap_or(true),
+                    description: table
+                        .get("description")
+                        .and_then(toml::Value::as_str)
+                        .map(str::to_owned),
+                };
+                (toggle != ToolToggle::default()).then_some((name, toggle))
             })
-            .collect();
-        for (name, toggle) in [
-            ("read", self.read.toggle()),
-            ("edit", self.edit.toggle()),
-            ("grep", self.grep.toggle()),
-            ("find", self.find.toggle()),
-            ("ls", self.ls.toggle()),
-            ("shell", self.shell.toggle()),
-            ("web_fetch", self.web_fetch.toggle()),
-            ("web_search", self.web_search.toggle()),
-        ] {
-            if toggle != ToolToggle::default() {
-                out.insert(name.to_owned(), toggle);
-            }
-        }
-        out
+            .collect()
     }
 
     /// Names of the tools set to `enabled = false`.
@@ -471,6 +462,8 @@ impl ToolsConfig {
     reason = "figment::Jail closures must return figment::Error"
 )]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::config::Config;
 
@@ -545,6 +538,39 @@ mod tests {
         assert_eq!(descriptions["shell"], "Run it.");
         assert_eq!(descriptions["github__create_issue"], "Open an issue.");
         t.validate().unwrap();
+    }
+
+    /// Every typed table, the media ones included, honours `enabled` and
+    /// `description` the way an `other` table does.
+    #[test]
+    fn every_typed_table_takes_enabled_and_description() {
+        let names = [
+            "read",
+            "edit",
+            "grep",
+            "find",
+            "ls",
+            "shell",
+            "web_fetch",
+            "web_search",
+            "generate_image",
+            "edit_image",
+            "generate_speech",
+            "generate_music",
+        ];
+        let toml = names.iter().fold(String::new(), |mut out, name| {
+            let _ = write!(
+                out,
+                "[tools.{name}]\nenabled = false\ndescription = \"{name}!\"\n"
+            );
+            out
+        });
+        let tools = load(&toml).tools;
+        assert!(tools.other.is_empty(), "{:?}", tools.other);
+        assert_eq!(tools.disabled(), names.map(str::to_owned).into());
+        for name in names {
+            assert_eq!(tools.descriptions()[name], format!("{name}!"));
+        }
     }
 
     /// `other` holds raw TOML, so a `Config` round trip is what proves

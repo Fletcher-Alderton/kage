@@ -387,7 +387,10 @@ saved key fills in when it is not. With neither, no key is sent.
 OpenAI-compatible images endpoint can be given as `base_url` instead.
 When the table does not resolve (a key that is not set, a provider of
 another kind, no model), kage says why on stderr and starts without
-the tool.
+the tool. `enabled = false` keeps a configured table but leaves the
+tool out, and `description` replaces the one the model reads, as for
+[every tool](#built-in-tools). The same holds for `edit_image`,
+`generate_speech` and `generate_music` below.
 
 The image comes back with the call: the TUI, the desktop and editors
 show it, it stays in the session, and a model that reads images in
