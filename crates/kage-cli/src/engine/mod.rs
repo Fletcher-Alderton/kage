@@ -78,6 +78,17 @@ use swarm_tool::{SWARM_TOOL, SwarmTool};
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
 pub(crate) use edit_image_tool::EDIT_IMAGE_TOOL;
+
+/// Tools built per run into a copy of the session registry rather than
+/// into it, so a `[tools.<name>]` table for one is not a typo. The
+/// hosts that build a registry without a session seed these too.
+pub(crate) const PER_RUN_TOOLS: [&str; 5] = [
+    AGENT_TOOL,
+    SWARM_TOOL,
+    MAILBOX_TOOL,
+    ASK_USER_QUESTION_TOOL,
+    EXIT_PLAN_TOOL,
+];
 pub(crate) use image_tool::GENERATE_IMAGE_TOOL;
 pub(crate) use music_tool::GENERATE_MUSIC_TOOL;
 pub(crate) use speech_tool::GENERATE_SPEECH_TOOL;
@@ -803,13 +814,7 @@ impl Dispatcher {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        session.tools.note_known(&[
-            AGENT_TOOL,
-            SWARM_TOOL,
-            MAILBOX_TOOL,
-            ASK_USER_QUESTION_TOOL,
-            EXIT_PLAN_TOOL,
-        ]);
+        session.tools.note_known(&PER_RUN_TOOLS);
         warn_unmatched(&bus, id, session.tools.unmatched_overrides());
     }
 

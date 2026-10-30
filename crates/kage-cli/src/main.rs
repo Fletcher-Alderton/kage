@@ -1272,13 +1272,9 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     let system_prompt =
         runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills, shell.as_deref());
 
-    let layered = kage_core::config::Config::load_layered(&workdir).unwrap_or_default();
-    let mut tools = kage_tools::configured_registry(&layered.tools, &layered.shell);
-    let (mcp_manager, mcp_errors) =
-        mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
-    for (server, err) in mcp_errors {
-        eprintln!("kage: mcp `{server}`: {err}");
-    }
+    let Ok((layered, tools, mcp_manager)) = run_tools(&workdir, plugin_runtime.as_deref()) else {
+        return ExitCode::from(1);
+    };
     let cx = print_context(
         AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir),
         &registry,
@@ -1497,6 +1493,47 @@ fn model_arg(value: &str) -> Result<String, String> {
 
 pub(crate) fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
     dir.join(format!("{session}.jsonl"))
+}
+
+/// The config and the tool registry a host runs with: `[tools]` and
+/// `[shell]` applied, MCP servers registered, and `[tools.<name>]`
+/// tables that name no tool reported.
+///
+/// A config that does not load exits rather than falling back to the
+/// defaults: a broken `[tools.*]` key would otherwise silently drop
+/// `[permissions]` and `[shell]` too. The per-run tools are seeded
+/// before the report, since they are built into a copy of the registry
+/// and never into it.
+fn run_tools(
+    workdir: &Path,
+    plugin_runtime: Option<&kage_plugin::PluginRuntime>,
+) -> Result<
+    (
+        kage_core::config::Config,
+        kage_tools::ToolRegistry,
+        kage_mcp::McpManager,
+    ),
+    ExitCode,
+> {
+    let layered = match kage_core::config::Config::load_layered(workdir) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    let mut tools = kage_tools::configured_registry(&layered.tools, &layered.shell);
+    let (mcp_manager, mcp_errors) = mcp::spawn_and_register(&mut tools, workdir, plugin_runtime);
+    for (server, err) in mcp_errors {
+        eprintln!("kage: mcp `{server}`: {err}");
+    }
+    tools.note_known(&engine::PER_RUN_TOOLS);
+    for name in tools.unmatched_overrides() {
+        eprintln!(
+            "kage: [tools.{name}] matches no tool; ignoring it (check the name and its case)"
+        );
+    }
+    Ok((layered, tools, mcp_manager))
 }
 
 #[cfg(test)]
