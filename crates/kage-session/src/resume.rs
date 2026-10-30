@@ -468,6 +468,54 @@ mod tests {
         }
     }
 
+    /// A tool result that only mentions a swarm marker on a later line
+    /// is ordinary output, so replay cuts it like any other oversized
+    /// result instead of keeping it whole as a swarm aggregate.
+    #[test]
+    fn replay_caps_a_result_that_only_mentions_a_swarm_marker() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let output = format!(
+            "src/a.jsonl:1:\n<swarm description=\"d\" item=\"a\">\n{}",
+            "x".repeat(kage_core::MAX_TOOL_RESULT_BYTES + 1)
+        );
+        write(
+            &path,
+            fresh_header(),
+            &[SessionEntry::Message(MessageEntry {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                message: Arc::new(Message::new(
+                    Role::ToolResult,
+                    vec![Content::ToolResultBlock {
+                        call_id: ToolCallId::new("c1"),
+                        output: output.clone(),
+                        is_error: false,
+                    }],
+                    None,
+                )),
+                usage: None,
+            })],
+        );
+
+        let history = replay(&path).unwrap().history;
+        let Content::ToolResultBlock {
+            output: replayed, ..
+        } = &history[0].content[0]
+        else {
+            panic!("expected a tool result, got {:?}", history[0].content[0]);
+        };
+        assert!(
+            replayed.len() <= kage_core::MAX_TOOL_RESULT_BYTES,
+            "replayed length {}",
+            replayed.len()
+        );
+        assert!(
+            replayed.starts_with("src/a.jsonl:1:"),
+            "the head is kept, the filler is cut"
+        );
+    }
+
     #[test]
     fn replay_reconstructs_basic_history() {
         let dir = tempdir().unwrap();

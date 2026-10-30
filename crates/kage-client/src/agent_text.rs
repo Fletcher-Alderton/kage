@@ -73,7 +73,9 @@ pub fn split(text: &str) -> Option<(&str, Vec<AgentText>)> {
             .strip_prefix(tag)?
             .strip_suffix('>')?;
         let attr = |key: &str| attr(attrs, key);
-        let body = body.replace(&format!("<\\/{tag}"), &format!("</{tag}"));
+        let body = body
+            .replace(&format!("<\\/{tag}"), &format!("</{tag}"))
+            .replace("\\\\", "\\");
         parts.push(if tag == "agent" {
             AgentText::Report(Report {
                 name: attr("name")?,
@@ -177,6 +179,55 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_backslash_in_a_report_body_is_unescaped() {
+        let text = r#"<agent name="a" session="s" state="completed">
+C:\\Users\\me
+</agent>"#;
+        let (_, parts) = split(text).unwrap();
+        assert_eq!(
+            parts,
+            [AgentText::Report(Report {
+                name: "a".into(),
+                session: "s".into(),
+                state: "completed".into(),
+                limit: None,
+                run_ms: None,
+                body: r"C:\Users\me".into(),
+            })]
+        );
+    }
+
+    #[test]
+    fn a_backslash_in_a_message_body_is_unescaped() {
+        let text = r#"<message from="x">
+C:\\Users\\me
+</message>"#;
+        let (_, parts) = split(text).unwrap();
+        assert_eq!(
+            parts,
+            [AgentText::Mail {
+                from: "x".into(),
+                body: r"C:\Users\me".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_backslash_body_round_trips_from_the_engine() {
+        let body = r"a \ b \\ c <\/agent> d </agent> e";
+        let mut report = kage_core::agent_report::AgentReport::header(
+            r#"<agent name="general" session="01K62W8Q3T9V5M2C7X4B1N0R6S" state="completed">"#,
+        )
+        .unwrap();
+        report.body = body.into();
+        let (_, parts) = split(&report.to_text()).unwrap();
+        let [AgentText::Report(read)] = parts.as_slice() else {
+            panic!("expected one report, got {parts:?}");
+        };
+        assert_eq!(read.body, body);
     }
 
     #[test]

@@ -1090,8 +1090,9 @@ fn first_agent_element(text: &str) -> Option<usize> {
     let at_line_start = |at: usize| at == 0 || text[..at].ends_with('\n');
     ["<agent ", "<message "]
         .iter()
-        .filter_map(|open| text.find(open))
-        .find(|at| at_line_start(*at))
+        .flat_map(|open| text.match_indices(open).map(|(at, _)| at))
+        .filter(|at| at_line_start(*at))
+        .min()
 }
 
 /// The `user_message_chunk` showing `content` to a client that did not
@@ -1649,6 +1650,31 @@ mod tests {
         assert_eq!(AgentReport::all_in(part).len(), 2);
 
         assert!(agent_part("plain words with no agent elements").is_none());
+    }
+
+    #[test]
+    fn first_agent_element_prefers_the_earliest_line_start() {
+        let first = "<message id=\"m1\">hi</message>\n<agent id=\"a1\">x</agent>";
+        assert_eq!(first_agent_element(first), Some(0));
+
+        let text = "say <agent x>\n<agent y>";
+        let at = first_agent_element(text).expect("no element");
+        assert_eq!(&text[at..], "<agent y>");
+
+        assert_eq!(first_agent_element("mid <agent x> line"), None);
+        assert_eq!(first_agent_element("plain words"), None);
+    }
+
+    #[test]
+    fn agent_part_keeps_a_message_before_an_agent_that_does_not_parse() {
+        let mail =
+            "<message from=\"kage\" session=\"01ARZ3NDEKTSV4RRFFQ69G5FAV\">\nhello\n</message>";
+        let broken = "<agent name=\"x\" session=\"bad\" state=\"completed\">\nbody\n</agent>";
+        let text = format!("{mail}\n{broken}");
+        let part = agent_part(&text).expect("no part");
+        assert!(part.starts_with("<message "), "{part}");
+        assert!(part.contains("hello"), "{part}");
+        assert!(part.contains("body"), "{part}");
     }
 
     #[test]

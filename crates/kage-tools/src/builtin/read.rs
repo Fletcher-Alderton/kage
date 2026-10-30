@@ -218,7 +218,8 @@ fn slice_file(
             }
             break;
         }
-        if gather_line(&mut reader, path, &mut raw, budget + 1)? == Gather::Eof {
+        let gather = gather_line(&mut reader, path, &mut raw, budget + 1)?;
+        if gather == Gather::Eof {
             reached_eof = true;
         }
         if raw.is_empty() {
@@ -231,24 +232,10 @@ fn slice_file(
         } else if last_ended_newline {
             raw.pop();
         }
-        let line = std::str::from_utf8(&raw).map_err(|_| {
-            ToolError::InvalidInput(format!(
-                "{} is not valid UTF-8 and is likely a binary file",
-                input.path
-            ))
-        })?;
-        if line.len() > budget {
-            let mut at = budget;
-            while !line.is_char_boundary(at) {
-                at -= 1;
-            }
-            shown += at;
-            lines.push(line[..at].to_owned());
+        if show_line(&raw, budget, gather, input, &mut shown, &mut lines)? {
             cut = true;
             break;
         }
-        shown += line.len();
-        lines.push(line.to_owned());
     }
     // The past-the-end error needs a genuine EOF: an inverted range
     // (end before start) stops early without one and stays an empty
@@ -273,6 +260,51 @@ fn slice_file(
         );
     }
     Ok(text)
+}
+
+/// Decode one gathered line into `lines`, counting its bytes into
+/// `shown`, and return whether the [`MAX_BYTES`] cap ended the read.
+/// An oversized line is cut at a character boundary. An incomplete
+/// sequence with a [`Gather::Capped`] line means the cap split the
+/// line's final character: the whole characters that fit go in and
+/// the read stops. The same sequence at [`Gather::Eof`] means the
+/// file itself ends mid-character, so it stays a binary-file error.
+/// Invalid UTF-8 away from the cap is a binary-file error either way.
+fn show_line(
+    raw: &[u8],
+    budget: usize,
+    gather: Gather,
+    input: &ReadInput,
+    shown: &mut usize,
+    lines: &mut Vec<String>,
+) -> Result<bool, ToolError> {
+    let not_text = || {
+        ToolError::InvalidInput(format!(
+            "{} is not valid UTF-8 and is likely a binary file",
+            input.path
+        ))
+    };
+    let (head, cut) = match std::str::from_utf8(raw) {
+        Ok(line) if line.len() > budget => {
+            let mut at = budget;
+            while !line.is_char_boundary(at) {
+                at -= 1;
+            }
+            (&line[..at], true)
+        }
+        Ok(line) => (line, false),
+        // A capped gather is at least budget + 1 bytes, so the line
+        // is always over budget here.
+        Err(e) if gather == Gather::Capped && e.error_len().is_none() => {
+            let at = e.valid_up_to();
+            let head = std::str::from_utf8(&raw[..at]).map_err(|_| not_text())?;
+            (head, true)
+        }
+        Err(_) => return Err(not_text()),
+    };
+    *shown += head.len();
+    lines.push(head.to_owned());
+    Ok(cut)
 }
 
 /// Scan `skip` lines out of `reader` without keeping them. Returns
@@ -317,11 +349,11 @@ fn skip_lines<R: BufRead>(
 }
 
 /// How [`gather_line`]'s line ended.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gather {
     /// A newline was read into the buffer.
     Newline,
-    /// The cap was reached with no newline in sight.
+    /// The cap was reached without a newline, and more bytes remain.
     Capped,
     /// The file ended. The buffer holds a trailing line without a
     /// newline, or nothing at all.
@@ -366,7 +398,14 @@ fn gather_line<R: BufRead>(
             None => return Ok(Gather::Eof),
         }
         if raw.len() >= cap {
-            return Ok(Gather::Capped);
+            // Peek past the cap: bytes still waiting mean a genuine
+            // cap, an empty buffer means the file ended exactly on
+            // the cap, which is EOF, not a cut character.
+            let more = !reader
+                .fill_buf()
+                .map_err(ToolError::io_at("read", path))?
+                .is_empty();
+            return Ok(if more { Gather::Capped } else { Gather::Eof });
         }
     }
 }
@@ -545,6 +584,135 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.text, "a");
+    }
+
+    /// The byte cap lands mid-character on one newline-free line of
+    /// 4-byte characters: the tool keeps the whole characters that
+    /// fit instead of rejecting the file as binary.
+    #[test]
+    fn truncates_single_long_line_of_four_byte_chars() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "\u{1F600}".repeat(MAX_BYTES / 4 + 10);
+        fs::write(dir.path().join("emoji.txt"), &line).unwrap();
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"emoji.txt"}),
+        )
+        .unwrap();
+        assert!(out.text.contains("truncated"), "{}", &out.text[..100]);
+        let body = out.text.split("\n\n[... truncated").next().unwrap();
+        assert!(
+            body.chars().all(|c| c == '\u{1F600}'),
+            "the cut keeps whole characters, got {} bytes",
+            body.len()
+        );
+        assert_eq!(body.len(), MAX_BYTES, "{}", body.len());
+    }
+
+    /// Earlier lines shrink the budget, moving the gather cap onto a
+    /// 3-byte character: the same whole-character cut applies.
+    #[test]
+    fn truncates_multibyte_line_after_earlier_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "\u{2022}".repeat(MAX_BYTES / 3 + 10);
+        fs::write(dir.path().join("f.txt"), format!("a\n{line}")).unwrap();
+        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"f.txt"})).unwrap();
+        assert!(out.text.contains("truncated"), "{}", &out.text[..100]);
+        let body = out.text.split("\n\n[... truncated").next().unwrap();
+        assert!(body.starts_with("a\n"), "{}", &body[..20]);
+        assert!(
+            body[2..].chars().all(|c| c == '\u{2022}'),
+            "the cut keeps whole characters, got {} bytes",
+            body.len()
+        );
+        assert_eq!(body.len(), MAX_BYTES, "{}", body.len());
+    }
+
+    /// A valid line whose budget lands mid-character takes the `Ok`
+    /// truncation branch: the cut walks back to the boundary itself,
+    /// independently of the torn-tail `Err` branch.
+    #[test]
+    fn truncation_walks_back_to_a_boundary_inside_a_valid_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("a\n{}\u{e9}y\n", "x".repeat(MAX_BYTES - 2));
+        fs::write(dir.path().join("f.txt"), &body).unwrap();
+        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"f.txt"})).unwrap();
+        assert!(out.text.contains("truncated"), "{}", &out.text[..100]);
+        let shown = out.text.split("\n\n[... truncated").next().unwrap();
+        assert_eq!(shown.len(), MAX_BYTES, "{}", shown.len());
+        assert!(shown.ends_with('x'), "{}", &shown[shown.len() - 20..]);
+    }
+
+    /// Valid UTF-8 whose end lands exactly on the gather cap is
+    /// legitimately truncated: EOF at the cap is not a torn file.
+    #[test]
+    fn valid_utf8_ending_exactly_at_the_cap_is_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("big.txt"), "a".repeat(MAX_BYTES + 1)).unwrap();
+        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"big.txt"})).unwrap();
+        assert!(out.text.contains("truncated"), "{}", &out.text[..100]);
+        let body = out.text.split("\n\n[... truncated").next().unwrap();
+        assert_eq!(body.len(), MAX_BYTES, "{}", body.len());
+    }
+
+    /// Invalid bytes before the cap are still a binary file: the
+    /// oversized-line tolerance must not loosen the rejection.
+    #[test]
+    fn a_long_line_with_invalid_utf8_is_still_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![b'x'; MAX_BYTES / 2];
+        bytes.extend_from_slice(&[0xff, 0xfe]);
+        bytes.resize(bytes.len() + MAX_BYTES, b'y');
+        fs::write(dir.path().join("bin.txt"), &bytes).unwrap();
+        let err = run(&ReadTool, dir.path(), serde_json::json!({"path":"bin.txt"})).unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
+
+    /// A file that merely ends with an incomplete sequence, with the
+    /// cap nowhere in sight, is a torn file and stays rejected.
+    #[test]
+    fn an_incomplete_sequence_at_eof_is_still_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = b"ok text ".to_vec();
+        bytes.extend_from_slice(&[0xf0, 0x9f, 0x98]);
+        fs::write(dir.path().join("torn.txt"), &bytes).unwrap();
+        let err = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"torn.txt"}),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
+
+    /// A file of exactly gather-cap bytes ending in an incomplete
+    /// sequence is torn at EOF, not split by the cap: nothing is left
+    /// to read, so no character was cut. It must stay a binary-file
+    /// error, like any torn file.
+    #[test]
+    fn an_incomplete_sequence_at_eof_on_the_cap_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![b'a'; MAX_BYTES - 2];
+        bytes.extend_from_slice(&[0xf0, 0x9f, 0x98]);
+        assert_eq!(bytes.len(), MAX_BYTES + 1);
+        fs::write(dir.path().join("torn.txt"), &bytes).unwrap();
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"torn.txt"}),
+        );
+        let err = match out {
+            Ok(out) => panic!(
+                "a file torn at EOF on the cap came back as truncated text, not an error: {:?}",
+                &out.text[..out.text.len().min(80)]
+            ),
+            Err(err) => err,
+        };
+        assert!(matches!(err, ToolError::InvalidInput(_)), "{err:?}");
+        assert!(err.to_string().contains("UTF-8"), "{err}");
     }
 
     #[test]

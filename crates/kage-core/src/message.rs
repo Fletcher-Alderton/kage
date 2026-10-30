@@ -399,13 +399,18 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 100_000;
 /// Whether `output` is an `agent` call's `<agent>` element or a `swarm`
 /// call's aggregate of `<swarm>` elements. Their tools bound their size
 /// themselves, and resuming a session reads every child's header line
-/// back out of them, so they are never cut. Both shapes are matched at
-/// a line start after leading padding, so a padded or blank-prefixed
-/// result is still detected.
+/// back out of them, so they are never cut. An `agent` element is
+/// matched at a line start after leading padding. A `swarm` aggregate is
+/// a `completed:` summary line followed directly by its first `<swarm>`
+/// element, so output that merely mentions a marker further down is not
+/// one.
 #[must_use]
 pub fn is_agent_result(output: &str) -> bool {
     let trimmed = output.trim_start();
-    trimmed.starts_with("<agent ") || trimmed.contains("\n<swarm description=\"")
+    trimmed.starts_with("<agent ")
+        || trimmed.split_once('\n').is_some_and(|(head, rest)| {
+            head.starts_with("completed: ") && rest.starts_with("<swarm description=\"")
+        })
 }
 
 /// `text` cut to at most [`MAX_TOOL_RESULT_BYTES`]: the first two
@@ -473,6 +478,19 @@ mod tests {
             "completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" item=\"a\">"
         ));
         assert!(!is_agent_result("exit code 0:\nsome ordinary text"));
+        assert!(!is_agent_result(
+            "notes.md:\n<swarm description=\"d\" item=\"a\">"
+        ));
+    }
+
+    #[test]
+    fn swarm_marker_after_the_first_line_is_ordinary_output() {
+        assert!(!is_agent_result(
+            "src/a.jsonl:1:\n<swarm description=\"d\" item=\"a\">\n"
+        ));
+        assert!(!is_agent_result(
+            "completed: 1, failed: 0, cancelled: 0\nother\n<swarm description=\"d\" item=\"a\">"
+        ));
     }
 
     #[test]
@@ -482,6 +500,9 @@ mod tests {
         ));
         assert!(is_agent_result(
             "  completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" item=\"a\">"
+        ));
+        assert!(is_agent_result(
+            "\n\n  completed: 1, failed: 0, cancelled: 0\n<swarm description=\"d\" item=\"a\">"
         ));
         // A marker that does not start a line is ordinary output.
         assert!(!is_agent_result(
