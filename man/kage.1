@@ -154,7 +154,7 @@ Directory with the web client bundle to serve at `/` (built from `crates/kage\-d
 Download the web client bundle matching this kage into the web directory, replacing what is there, then serve
 .TP
 \fBkage trust\fR
-Trust the current directory\*(Aqs `.kage/config.toml`. Until a project is trusted, its `mcp`, `permissions` and `plugins.capabilities` settings are ignored. Trust covers the values as they are now, so editing any of them asks again
+Trust the current directory\*(Aqs `.kage/config.toml`. Until a project is trusted, its `mcp`, `permissions`, `plugins.capabilities` and `tools` settings are ignored. Trust covers the values as they are now, so editing any of them asks again
 .TP
 \fB\-\-revoke\fR
 Forget the trust recorded for this directory
@@ -307,7 +307,7 @@ User config, written by kage init.
 Lua config the TUI runs after config.toml.
 .TP
 \fI<workdir>/.kage/config.toml\fR
-Project config, merged over the user config. Its mcp, permissions and plugins.capabilities tables apply only after kage trust.
+Project config, merged over the user config. Its mcp, permissions, plugins.capabilities and tools tables apply only after kage trust.
 .TP
 \fI~/.config/kage/{plugins,themes,agents,skills,templates}/\fR
 Lua plugins, user themes, agent definitions, skills and prompt templates.

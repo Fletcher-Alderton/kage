@@ -329,18 +329,16 @@ impl Config {
     /// validated like [`Self::load`]; repair callers use
     /// [`Self::load_layered_raw`].
     ///
-    /// The project file's `mcp`, `permissions` and
-    /// `plugins.capabilities` tables are dropped unless the project is
-    /// trusted (see [`crate::trust`]). The project file's `providers`,
+    /// The project file's `mcp`, `permissions`, `plugins.capabilities`
+    /// and `tools` tables are dropped unless the project is trusted (see
+    /// [`crate::trust`]). The project file's `providers`,
     /// `acp`, `plugins.registry` and the media tables
     /// `tools.generate_image`, `tools.edit_image`,
     /// `tools.generate_speech` and `tools.generate_music` never apply:
     /// those are only read from the user config.
     /// `plugins.disabled` is the union of the user's list and the
     /// winning layer's, so a project can disable a plugin but never
-    /// enable one the user disabled. Likewise a project can set
-    /// `[tools.<name>] enabled = false` but never re-enable a tool the
-    /// user's file disabled.
+    /// enable one the user disabled.
     pub fn load_layered(workdir: &Path) -> Result<Self> {
         let cfg = Self::load_layered_raw(workdir)?;
         cfg.validate()?;
@@ -357,11 +355,6 @@ impl Config {
             Some(filtered) => figment.merge(Toml::string(&filtered)),
             None => figment.merge(Toml::file(Self::project_path(workdir))),
         };
-        // A disable is often a safety choice, so the user's
-        // `enabled = false` is laid over the project file again.
-        if let Some(disables) = Self::default_path().and_then(|user| user_tool_disables(&user)) {
-            figment = figment.merge(Toml::string(&disables));
-        }
         figment = figment.merge(Env::prefixed("KAGE_").split("__"));
         let mut cfg: Self = figment.extract()?;
         // A later layer replaces an array, so a project's `disabled`
@@ -416,25 +409,6 @@ impl Config {
         crate::fsutil::atomic_write(path, doc.to_string().as_bytes())?;
         Ok(())
     }
-}
-
-/// The `[tools.<name>] enabled = false` tables of the user file at
-/// `path`, as TOML, or `None` when it disables no tool.
-fn user_tool_disables(path: &Path) -> Option<String> {
-    let tools: ToolsConfig = Figment::from(Toml::file(path))
-        .extract_inner("tools")
-        .ok()?;
-    let disabled = tools.disabled();
-    if disabled.is_empty() {
-        return None;
-    }
-    let off = toml::Table::from_iter([("enabled".to_owned(), toml::Value::Boolean(false))]);
-    let tables: toml::Table = disabled
-        .into_iter()
-        .map(|name| (name, toml::Value::Table(off.clone())))
-        .collect();
-    let root = toml::Table::from_iter([("tools".to_owned(), toml::Value::Table(tables))]);
-    toml::to_string(&root).ok()
 }
 
 /// Set `keys` to `value` under `root`, creating missing tables. An
@@ -1451,42 +1425,6 @@ mod tests {
             assert_eq!(cfg.plugins.disabled, ["noisy", "spy"]);
             assert!(!cfg.plugins.loads("spy"));
             assert!(cfg.plugins.loads("other"));
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn a_project_disables_tools_but_never_re_enables_one() {
-        let _globals = process_globals();
-        figment::Jail::expect_with(|jail| {
-            let home = jail.directory().to_path_buf();
-            jail.set_env("HOME", home.to_string_lossy().as_ref());
-            let xdg_config = home.join(".config");
-            jail.set_env("XDG_CONFIG_HOME", xdg_config.to_string_lossy().as_ref());
-            let io = |e: std::io::Error| figment::Error::from(e.to_string());
-            std::fs::create_dir_all(xdg_config.join("kage")).map_err(io)?;
-            std::fs::write(
-                xdg_config.join("kage/config.toml"),
-                "[tools.shell]\nenabled = false\n\
-                 [tools.github__delete_repository]\nenabled = false\n",
-            )
-            .map_err(io)?;
-            let project = home.join("project");
-            std::fs::create_dir_all(project.join(".kage")).map_err(io)?;
-            std::fs::write(
-                project.join(".kage/config.toml"),
-                "[tools.shell]\nenabled = true\ntimeout_ms = 5000\n\
-                 [tools.github__delete_repository]\nenabled = true\n\
-                 [tools.web_fetch]\nenabled = false\n",
-            )
-            .map_err(io)?;
-            let cfg =
-                Config::load_layered(&project).map_err(|e| figment::Error::from(e.to_string()))?;
-            assert_eq!(
-                cfg.tools.disabled().into_iter().collect::<Vec<_>>(),
-                ["github__delete_repository", "shell", "web_fetch"]
-            );
-            assert_eq!(cfg.tools.shell.timeout_ms, 5000);
             Ok(())
         });
     }

@@ -303,8 +303,8 @@ pub(crate) enum Command {
         fetch_web: bool,
     },
     /// Trust the current directory's `.kage/config.toml`. Until a
-    /// project is trusted, its `mcp`, `permissions` and
-    /// `plugins.capabilities` settings are ignored. Trust covers the
+    /// project is trusted, its `mcp`, `permissions`,
+    /// `plugins.capabilities` and `tools` settings are ignored. Trust covers the
     /// values as they are now, so editing any of them asks again.
     Trust {
         /// Forget the trust recorded for this directory.
@@ -937,7 +937,7 @@ const MANPAGE_FILES: &[(&str, &str)] = &[
     ),
     (
         "<workdir>/.kage/config.toml",
-        "Project config, merged over the user config. Its mcp, permissions and plugins.capabilities tables apply only after kage trust.",
+        "Project config, merged over the user config. Its mcp, permissions, plugins.capabilities and tools tables apply only after kage trust.",
     ),
     (
         "~/.config/kage/{plugins,themes,agents,skills,templates}/",

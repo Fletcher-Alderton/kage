@@ -218,8 +218,8 @@ for any tool, built-in, plugin or MCP:
   it to steer a model ("prefer `rg`"), or to shorten a description for
   a small context window.
 
-A project's `.kage/config.toml` can disable a tool too, but it can
-never turn back on a tool your own config disabled.
+A project's `[tools]` table applies only once you trust the project
+(see [project config and trust](#project-config-and-trust)).
 
 ```toml
 [tools.web_search]
@@ -310,14 +310,17 @@ as `kage.opt.theme`, wins over every layer above.
 
 ## project config and trust
 
-A project can start processes and loosen your tool rules, so these
-parts of it only apply once you trust the project:
+A project can start processes, loosen your tool rules and reshape the
+tools the model sees, so these parts of it only apply once you trust
+the project:
 
 - `[mcp]` in `.kage/config.toml` (servers, their `oauth` tables and
   `allow_sampling`)
 - `[permissions]` in `.kage/config.toml` (including
   `[permissions.mcp]`)
 - `[plugins.capabilities]` in `.kage/config.toml`
+- `[tools]` in `.kage/config.toml` (`enabled`, `description`, limits,
+  `rename` and `[tools.web_search]`)
 - the agent definitions in `.kage/agents/` (see
   [agents](/guide/agents#project-agents-and-trust))
 
@@ -330,9 +333,13 @@ are only read from your user config.
 
 When the TUI starts in a project that sets any of these, it lists what
 the project asks for (server commands and URLs, sampling, capability
-grants, permission changes, project agents) and asks `Trust this
-project? [y/N]`. Answering yes records the trust. Any other answer
-starts kage with those tables and agents ignored.
+grants, permission changes, tool settings, project agents) and asks
+`Trust this project? [y/N]`. Answering yes records the trust. Any other
+answer starts kage with those tables and agents ignored.
+
+A trusted project's `[tools.<name>] enabled = true` turns on a tool
+your own config disables, so a tool can stay off everywhere but in one
+project.
 
 Print mode, `kage rpc` and `kage mcp serve` cannot ask. They print one
 warning on stderr and ignore the tables and agents. Run `kage trust`

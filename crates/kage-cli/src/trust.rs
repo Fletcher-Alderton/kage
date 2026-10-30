@@ -99,7 +99,7 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
     }
     let Some(presented) = trust::untrusted_project(&workdir) else {
         eprintln!(
-            "kage: {} has no mcp, permissions or plugins.capabilities settings and no agents to trust",
+            "kage: {} has no mcp, permissions, plugins.capabilities or tools settings and no agents to trust",
             workdir.join(".kage").display()
         );
         return ExitCode::SUCCESS;
